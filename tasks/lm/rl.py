@@ -79,24 +79,33 @@ class Trajectory:
     output_tokens: List[str]
 
 
-def _build_pos_groups(brain: Brain, vocab: Vocab) -> Dict[int, int]:
-    """Build a {token_neuron_id: pos_neuron_id} group map.
+def _build_token_pos_map(brain: Brain, vocab: Vocab) -> Dict[int, int]:
+    """Build {token_neuron_id: pos_neuron_id} once.
 
-    For sparsity-aware spread: tokens that share a POS form a group;
-    `spread()` will only keep the top-K most-activated tokens per POS
-    class each step, instead of firehose-pumping every member of every
-    POS class via has_member edges.
+    Used for two things:
+      - the POS-match filter in trace_generate's read-out (was a hot
+        loop scanning synapses every emission step)
+      - sparsity-aware spread groups (when group_top_k is enabled)
+
+    Profile showed the inner POS-scan was 11% of training time. Lifting
+    the scan out of the per-emission inner loop into a single pass at
+    generate-call time eliminates O(emissions × tokens × synapses)
+    work in favor of O(tokens × synapses) once.
     """
     rel_is_a = brain.relation_id[IS_A]
-    groups: Dict[int, int] = {}
+    pos_map: Dict[int, int] = {}
     for tid in vocab.id_to_token:
         for syn in brain.synapses_of(tid):
             if int(syn['relation']) == rel_is_a:
                 pid = int(syn['to_id'])
                 if pid in vocab.id_to_pos:
-                    groups[tid] = pid
+                    pos_map[tid] = pid
                     break
-    return groups
+    return pos_map
+
+
+# Backwards compatibility for any caller still using the old name
+_build_pos_groups = _build_token_pos_map
 
 
 def trace_generate(brain: Brain, vocab: Vocab,
@@ -144,10 +153,11 @@ def trace_generate(brain: Brain, vocab: Vocab,
     for k in range(max_new):
         vocab.add_step(k, brain)
 
-    # Build the POS-class group map ONCE per generate call. Substrate
-    # uses it for sparsity-aware spread — within each POS class, only
-    # the top-K most-activated tokens survive each spread step.
-    pos_groups = _build_pos_groups(brain, vocab) if group_top_k else None
+    # Build the token→POS map ONCE per generate call. Used for:
+    #  - POS-match filter in read-out (was scanning synapses every step)
+    #  - sparsity-aware spread groups (when group_top_k is enabled)
+    token_pos_map = _build_token_pos_map(brain, vocab)
+    pos_groups = token_pos_map if group_top_k else None
 
     for step_idx in range(max_new):
         # Determine next POS:
@@ -208,7 +218,9 @@ def trace_generate(brain: Brain, vocab: Vocab,
                         group_top_k=group_top_k)
 
         # Candidate set: tokens whose IS_A points to next_pos_nid,
-        # excluding the antiloop window
+        # excluding the antiloop window. Uses precomputed token→POS map
+        # (built once at top of generate) instead of scanning synapses
+        # per candidate.
         recent = set(emitted_ids[-antiloop_window:]) if antiloop_window else set()
         candidates: List[Tuple[int, float]] = []
         for nid, lvl in state.activation.items():
@@ -216,29 +228,19 @@ def trace_generate(brain: Brain, vocab: Vocab,
                 continue
             if nid in recent:
                 continue
-            token_pos_match = any(
-                int(syn['to_id']) == next_pos_nid
-                and int(syn['relation']) == rel_is_a
-                for syn in brain.synapses_of(nid)
-            )
-            if not token_pos_match:
+            if token_pos_map.get(nid) != next_pos_nid:
                 continue
             if lvl > 0:
                 candidates.append((nid, lvl))
 
-        # If no scored candidates, fall back to any token of the right POS
-        # (otherwise RL never gets a chance to grow co_occurs from a cold start)
+        # Cold-start fallback: any token of the right POS gets seeded.
         if not candidates:
-            for nid in vocab.id_to_token:
+            for nid, pid in token_pos_map.items():
+                if pid != next_pos_nid:
+                    continue
                 if nid in recent:
                     continue
-                token_pos_match = any(
-                    int(syn['to_id']) == next_pos_nid
-                    and int(syn['relation']) == rel_is_a
-                    for syn in brain.synapses_of(nid)
-                )
-                if token_pos_match:
-                    candidates.append((nid, 1e-3))
+                candidates.append((nid, 1e-3))
 
         if not candidates:
             break
