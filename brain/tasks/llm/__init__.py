@@ -21,11 +21,13 @@ from .llm import (
     train_ngram_epoch_batched, train_ngram_epoch_fast,
     generate_text, perplexity,
 )
+from .jit import train_ngram_epoch_jit, NUMBA_AVAILABLE
 
 __all__ = [
     'WordTokenizer',
     'LLMVocab', 'build_llm_brain', 'build_llm_view', 'LLMView',
     'train_bigram_epoch', 'train_ngram_epoch',
     'train_ngram_epoch_batched', 'train_ngram_epoch_fast',
+    'train_ngram_epoch_jit', 'NUMBA_AVAILABLE',
     'generate_text', 'perplexity',
 ]

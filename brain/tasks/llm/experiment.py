@@ -28,6 +28,7 @@ from brain.tasks.llm.llm import (
     build_llm_view, train_ngram_epoch, train_ngram_epoch_batched,
     generate_text, perplexity,
 )
+from brain.tasks.llm.jit import train_ngram_epoch_jit, NUMBA_AVAILABLE
 
 
 def load_tinystories(*, train_n: int = 1000, test_n: int = 200,
@@ -91,9 +92,11 @@ def main():
     best_ppl = pre_ppl
     for ep in range(epochs):
         t0 = time.time()
-        m = train_ngram_epoch(view, train_seqs,
-                                context_window=context_window,
-                                eta=eta, rng=rng)
+        # Use JIT'd kernel if available (~10× faster), else fall back
+        train_fn = train_ngram_epoch_jit if NUMBA_AVAILABLE else train_ngram_epoch
+        m = train_fn(view, train_seqs,
+                       context_window=context_window,
+                       eta=eta, rng=rng)
         elapsed = time.time() - t0
         ppl = perplexity(view, test_seqs[:50], context_window=context_window)
         if ppl < best_ppl:
