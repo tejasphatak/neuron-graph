@@ -17,9 +17,11 @@ distinct domains: RL games, language modeling, and image classification.
 | **LM** 20-sent corpus, real inference | **87%** (11/20 perfect) | 478 KB | substrate-predicted sentence-id |
 | LM sentence-id prediction from prompt | 95% (19/20) | — | — |
 | **MNIST** full set (60K/10K, 10 epochs, 60s) | **88.3%** | 501 KB | 100% match: spread() ≡ fast path |
+| **Audio** 4-tone classification (synthetic) | **100%** | ~10 KB | scale-invariant: any duration |
+| **Video** 4-motion classification (synthetic) | **100%** | ~30 KB | scale-invariant: any T, H, W |
 | Substrate-LM training speed | 70 ms / epoch | — | vectorized spread |
 
-**Three distinct domains, same substrate primitives, no architectural change.**
+**Five distinct domains, same substrate primitives, no architectural change.**
 
 ### Model size context
 
@@ -96,6 +98,12 @@ brain/tasks/mnist/                vision / classification
   mnist.py         build_mnist_brain, train_step, predict, evaluate
   fast.py          dense forward+backward (Adam supported)
                    verify_substrate_learning (substrate ≡ fast path)
+brain/tasks/audio/                audio classification
+  encoder.py       AudioEncoder: 1D signal → spectrogram → fixed grid
+                   any duration / sample rate → fixed substrate input
+brain/tasks/video/                video classification
+  encoder.py       VideoEncoder: T×H×W → uniform-sample frames → grid
+                   any T / H / W → fixed substrate input
 ```
 
 ## Design rules
@@ -113,7 +121,12 @@ brain/tasks/mnist/                vision / classification
 
 ## What's proven
 
-- ✅ **Modality polymorphism** across 3 distinct domains (RL / sequence / vision)
+- ✅ **Modality polymorphism** across 5 distinct domains:
+    - RL games (TTT) — 100% draws vs minimax
+    - sequence (LM) — 87% real-inference at 20-sent scale
+    - vision (MNIST) — 88.3% on full set
+    - audio (4-tone classification) — 100% on synthetic
+    - video (motion patterns) — 100% on synthetic
 - ✅ RL self-correction grows the routing graph from reward (LM: 28% → 89%)
 - ✅ Substrate's edges genuinely encode the learning (MNIST: 100% spread/fast match)
 - ✅ Adam-style optimizer applied to substrate edge deltas (no gradients)
