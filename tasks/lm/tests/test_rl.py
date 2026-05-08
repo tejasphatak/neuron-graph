@@ -16,7 +16,7 @@ from brain.tasks.lm import build_lm_brain
 from brain.tasks.lm.rl import (
     teach_minimal, trace_generate, reward_trajectory,
     apply_correction, train_rl, train_rl_curriculum,
-    GenerationStep, Trajectory,
+    predict_sentence_id, GenerationStep, Trajectory,
 )
 
 
@@ -231,6 +231,47 @@ class TestRLTraining:
         # Substrate should have grown new edges from reward
         assert final_synapses > initial_synapses, \
             f'no edges grown: started {initial_synapses}, ended {final_synapses}'
+
+
+# ─── Sentence-ID binding ─────────────────────────────────────────────────
+
+class TestSentenceIdBinding:
+    """Sentence-id neurons are per-sentence context anchors. Each
+    training pair gets a unique neuron seeded as a goal during emission;
+    RL grows (sentence_i → token) edges that route sentence-specifically.
+    At inference, predict_sentence_id picks the right anchor from the
+    prompt's co-activation pattern."""
+
+    def test_sentence_neurons_created_when_enabled(self):
+        brain, vocab = _seeded_brain()
+        training_pairs = [(s[:3], s[3:], POS) for s in CORPUS]
+        # Without use_sentence_id, no sentence neurons should exist
+        assert len(vocab.sentence_to_id) == 0
+
+        train_rl(brain, vocab, training_pairs, epochs=5,
+                  eta=0.18, seed=0, use_sentence_id=True)
+        # One sentence neuron per training pair
+        assert len(vocab.sentence_to_id) == len(training_pairs)
+
+    def test_predict_sentence_id_returns_known_sentence(self):
+        """After training with sentence-id binding, predict_sentence_id
+        should at least return SOME sentence neuron, not None."""
+        brain, vocab = _seeded_brain()
+        training_pairs = [(s[:3], s[3:], POS) for s in CORPUS]
+        train_rl(brain, vocab, training_pairs, epochs=20,
+                  eta=0.18, seed=0, use_sentence_id=True)
+
+        # First sentence's prompt
+        pred = predict_sentence_id(brain, vocab, CORPUS[0][:3])
+        assert pred is not None
+        assert pred in vocab.id_to_sentence
+
+    def test_predict_sentence_id_returns_none_without_training(self):
+        """Without sentence-id training, no sentence neurons exist —
+        prediction should return None."""
+        brain, vocab = _seeded_brain()
+        pred = predict_sentence_id(brain, vocab, CORPUS[0][:3])
+        assert pred is None
 
 
 # ─── Curriculum learning ─────────────────────────────────────────────────

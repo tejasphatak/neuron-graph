@@ -79,6 +79,47 @@ class Trajectory:
     output_tokens: List[str]
 
 
+def predict_sentence_id(brain: Brain, vocab: Vocab,
+                          prompt_tokens: List[str], *,
+                          wm_decay: float = 0.6,
+                          max_steps: int = 2) -> Optional[int]:
+    """Given a prompt, find the highest-activated sentence-id neuron.
+
+    Used at inference: we don't know which sentence a prompt belongs to,
+    so spread from the prompt and let the substrate tell us. The
+    sentence neurons that the prompt's tokens have learned co_occurs to
+    will activate; argmax picks the most-likely one.
+
+    Returns None if no sentence neuron is activated above threshold
+    (e.g. before training, or for an out-of-distribution prompt).
+    """
+    if not vocab.sentence_to_id or not prompt_tokens:
+        return None
+
+    prompt_ids = [vocab.token_to_id[t] for t in prompt_tokens
+                   if t in vocab.token_to_id]
+    if not prompt_ids:
+        return None
+
+    wm = WorkingMemory(decay=wm_decay, max_size=64, floor=0.05)
+    seeds = {nid: wm_decay ** offset
+              for offset, nid in enumerate(reversed(prompt_ids))}
+    wm.absorb(seeds, gain=1.0)
+
+    state = spread(brain, seeds=[],
+                    working_memory=wm,
+                    max_steps=max_steps,
+                    sparsity=1.0)
+
+    best_nid = None
+    best_lvl = -1.0
+    for nid, lvl in state.activation.items():
+        if nid in vocab.id_to_sentence and lvl > best_lvl:
+            best_lvl = lvl
+            best_nid = nid
+    return best_nid
+
+
 def _build_token_pos_map(brain: Brain, vocab: Vocab) -> Dict[int, int]:
     """Build {token_neuron_id: pos_neuron_id} once.
 
@@ -118,7 +159,8 @@ def trace_generate(brain: Brain, vocab: Vocab,
                     rng: Optional[np.random.Generator] = None,
                     explore_eps: float = 0.1,
                     pos_sequence: Optional[List[str]] = None,
-                    group_top_k: Optional[int] = None) -> Trajectory:
+                    group_top_k: Optional[int] = None,
+                    sentence_nid: Optional[int] = None) -> Trajectory:
     """Like generate_open_vocab but records per-step substrate state.
 
     `explore_eps` adds ε-greedy exploration: with probability `explore_eps`
@@ -130,6 +172,14 @@ def trace_generate(brain: Brain, vocab: Vocab,
     grammar shape. Lets RL focus on learning *which* token within a POS
     class, separately from *which POS comes next*. (The latter is
     ambiguous at cap-saturated FOLLOWS weights — a separate problem.)
+
+    `sentence_nid`, if given, is the sentence-id neuron seeded in WM at
+    full strength. RL grows (sentence_nid → token) co_occurs edges,
+    giving each training pair a unique context anchor that breaks the
+    same-position-same-POS ambiguity at scale. At inference, the prompt
+    can predict its own sentence_nid via spread (the prompt activates
+    its co-occurring sentence neuron most), then that neuron drives
+    generation with sentence-specific routing.
     """
     if rng is None:
         rng = np.random.default_rng()
@@ -202,15 +252,20 @@ def trace_generate(brain: Brain, vocab: Vocab,
         # so its co_occurs edges to position-correct tokens fire at full
         # strength, providing the disambiguator that separates same-POS
         # tokens at different sentence positions.
+        # If sentence_nid is given, it ALSO becomes a goal — the
+        # sentence-specific anchor that breaks at-scale ambiguity.
         wm = WorkingMemory(decay=wm_decay, max_size=64, floor=0.05)
         seed_dict = {nid: wm_decay ** offset
                       for offset, nid in enumerate(reversed(emitted_ids))}
         wm.absorb(seed_dict, gain=1.0)
 
         cur_step_nid = vocab.step_to_id[step_idx]
+        goal_list = [next_pos_nid, cur_step_nid]
+        if sentence_nid is not None:
+            goal_list.append(sentence_nid)
         state = spread(brain, seeds=[],
                         working_memory=wm,
-                        goals=[next_pos_nid, cur_step_nid],
+                        goals=goal_list,
                         goal_strength=goal_strength,
                         max_steps=max_steps,
                         sparsity=1.0,
@@ -253,10 +308,12 @@ def trace_generate(brain: Brain, vocab: Vocab,
 
         # Store seed_ids in CHRONOLOGICAL order (oldest first, most-
         # recent last). apply_correction's `seed_ids[-context_window:]`
-        # then correctly takes the most-recent N tokens. The step neuron
-        # is appended at the end to also be credited.
+        # then correctly takes the most-recent N tokens. The step
+        # neuron and sentence neuron are appended so they're credited.
         seed_list = list(emitted_ids)  # already chronological
         seed_list.append(cur_step_nid)
+        if sentence_nid is not None:
+            seed_list.append(sentence_nid)
         steps.append(GenerationStep(
             emitted_id=best_id,
             activation=dict(state.activation),
@@ -369,13 +426,14 @@ def apply_correction(brain: Brain, vocab: Vocab,
         if emitted_lvl <= 0:
             continue
 
-        # Local context: last N TOKEN seeds + step neuron at full strength.
-        # The step neuron is critical — it carries position info that lets
-        # 'fox' (step_0) and 'dog' (step_5) differentiate even when their
-        # token contexts overlap.
+        # Local context: last N TOKEN seeds + step neuron + sentence
+        # neuron at full strength. The step and sentence neurons carry
+        # POSITION and SENTENCE info — lets 'fox' (sent_0, step_0) and
+        # 'cat' (sent_1, step_0) differentiate even when contexts overlap.
         all_seeds = step.seed_ids
         token_seeds = [s for s in all_seeds if s in vocab.id_to_token]
         step_seeds = [s for s in all_seeds if s in vocab.id_to_step]
+        sentence_seeds = [s for s in all_seeds if s in vocab.id_to_sentence]
 
         recent_tokens = token_seeds[-context_window:] if context_window else token_seeds
         wm_decay_assumed = 0.6  # matches trace_generate default
@@ -383,15 +441,19 @@ def apply_correction(brain: Brain, vocab: Vocab,
             nid: wm_decay_assumed ** offset
             for offset, nid in enumerate(reversed(recent_tokens))
         }
-        # Step neurons get full credit weight (they were seeded at 1.0)
+        # Step + sentence neurons get full credit weight (seeded at 1.0)
         for sid in step_seeds:
+            seed_strength[sid] = 1.0
+        for sid in sentence_seeds:
             seed_strength[sid] = 1.0
 
         for nid, base_strength in seed_strength.items():
             if nid == emitted:
                 continue
-            # Allow tokens AND step neurons (substrate's positional embeddings)
-            if nid not in vocab.id_to_token and nid not in vocab.id_to_step:
+            # Allow tokens, step neurons, and sentence neurons
+            if (nid not in vocab.id_to_token
+                    and nid not in vocab.id_to_step
+                    and nid not in vocab.id_to_sentence):
                 continue
             if base_strength < co_threshold:
                 continue
@@ -442,7 +504,9 @@ def train_rl(brain: Brain, vocab: Vocab,
               replay_buffer: Optional[ReplayBuffer] = None,
               use_btsp: bool = False,
               btsp_forward_gamma: float = 0.7,
-              btsp_backward_gamma: float = 0.5) -> List[Dict[str, float]]:
+              btsp_backward_gamma: float = 0.5,
+              use_sentence_id: bool = False,
+              sentence_id_offset: int = 0) -> List[Dict[str, float]]:
     """Each tuple = (prompt_tokens, target_continuation, full_pos_sequence).
 
     Replay buffer integration (NEW, scaled-corpus optimization):
@@ -482,12 +546,16 @@ def train_rl(brain: Brain, vocab: Vocab,
         ep_created = 0
         ep_replays = 0
 
-        for prompt, target, pos_seq in training_pairs:
+        for pair_idx, (prompt, target, pos_seq) in enumerate(training_pairs):
+            sent_nid: Optional[int] = None
+            if use_sentence_id:
+                sent_nid = vocab.add_sentence(sentence_id_offset + pair_idx, brain)
             traj = trace_generate(brain, vocab, prompt,
                                    max_new=len(target),
                                    rng=rng, explore_eps=eps,
                                    pos_sequence=pos_seq,
-                                   group_top_k=group_top_k)
+                                   group_top_k=group_top_k,
+                                   sentence_nid=sent_nid)
             rewards = reward_trajectory(traj, target)
             mean_r = sum(rewards) / max(1, len(rewards))
             # BTSP-inspired bidirectional credit: each step's plasticity
@@ -572,7 +640,8 @@ def train_rl_curriculum(brain: Brain, vocab: Vocab,
                           group_top_k: Optional[int] = None,
                           use_btsp: bool = False,
                           btsp_forward_gamma: float = 0.7,
-                          btsp_backward_gamma: float = 0.5
+                          btsp_backward_gamma: float = 0.5,
+                          use_sentence_id: bool = False
                           ) -> List[Dict[str, float]]:
     """Progressive subset curriculum.
 
@@ -624,6 +693,11 @@ def train_rl_curriculum(brain: Brain, vocab: Vocab,
             use_btsp=use_btsp,
             btsp_forward_gamma=btsp_forward_gamma,
             btsp_backward_gamma=btsp_backward_gamma,
+            use_sentence_id=use_sentence_id,
+            # Pair index in the FULL corpus (not subset) so sentence_nids
+            # are stable across stages — sentence_3 in stage 1 is still
+            # sentence_3 in stage 4
+            sentence_id_offset=0,
         )
         for h in stage_history:
             h['stage'] = stage

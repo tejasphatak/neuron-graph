@@ -37,7 +37,8 @@ CO_OCCURS = 'co_occurs'     # token ↔ token within the same sentence
 @dataclass
 class Vocab:
     """token <-> neuron-id, plus POS-tag <-> neuron-id, plus slot positions,
-    plus step-position neurons (substrate's positional embeddings)."""
+    plus step-position neurons (substrate's positional embeddings),
+    plus sentence-id neurons (per-sentence context anchors)."""
     token_to_id: Dict[str, int] = field(default_factory=dict)
     id_to_token: Dict[int, str] = field(default_factory=dict)
     pos_to_id: Dict[str, int] = field(default_factory=dict)
@@ -45,6 +46,8 @@ class Vocab:
     slot_to_id: Dict[int, int] = field(default_factory=dict)  # position-index → neuron
     step_to_id: Dict[int, int] = field(default_factory=dict)  # step-relative-to-prompt → neuron
     id_to_step: Dict[int, int] = field(default_factory=dict)
+    sentence_to_id: Dict[int, int] = field(default_factory=dict)  # sentence-index → neuron
+    id_to_sentence: Dict[int, int] = field(default_factory=dict)
 
     def add_token(self, token: str, brain: Brain) -> int:
         if token not in self.token_to_id:
@@ -65,6 +68,27 @@ class Vocab:
             nid = brain.add_neuron(lemma=f'slot:{position}', decay=0.7)
             self.slot_to_id[position] = nid
         return self.slot_to_id[position]
+
+    def add_sentence(self, idx: int, brain: Brain) -> int:
+        """Sentence-id neuron — context anchor for one training pair.
+
+        Each training sentence gets a unique neuron. Seeded into WM during
+        both training and inference so RL grows
+          sentence_i --co_occurs--> token  edges
+        that route SENTENCE-conditionally — breaks the same-position-same-POS
+        ambiguity at scale (where 'fox' and 'cat' both compete at NOUN slot 3
+        from prompts that look similar).
+
+        At inference, the sentence neuron is identified from the prompt
+        (which sentence does this prompt come from?). For shared-prompt
+        cases, a sentence "search" via spread can pick the most-likely
+        sentence-id from the prompt context.
+        """
+        if idx not in self.sentence_to_id:
+            nid = brain.add_neuron(lemma=f'sent:{idx}', decay=0.7)
+            self.sentence_to_id[idx] = nid
+            self.id_to_sentence[nid] = idx
+        return self.sentence_to_id[idx]
 
     def add_step(self, position: int, brain: Brain) -> int:
         """Position-step neuron — substrate's positional embedding.

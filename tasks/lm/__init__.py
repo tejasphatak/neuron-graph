@@ -13,6 +13,7 @@ from .tiny import (
 from .rl import (
     teach_minimal, trace_generate, reward_trajectory,
     apply_correction, train_rl, train_rl_curriculum,
+    predict_sentence_id, btsp_credit,
     GenerationStep, Trajectory,
 )
 
@@ -21,5 +22,6 @@ __all__ = [
     'generate', 'generate_via_spread', 'generate_open_vocab',
     'teach_minimal', 'trace_generate', 'reward_trajectory',
     'apply_correction', 'train_rl', 'train_rl_curriculum',
+    'predict_sentence_id', 'btsp_credit',
     'GenerationStep', 'Trajectory',
 ]
