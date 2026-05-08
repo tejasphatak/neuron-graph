@@ -168,24 +168,55 @@ def train_ngram_epoch(view: LLMView, sequences: List[List[int]], *,
                         eta: float = 0.05,
                         decay: float = 0.6,
                         shuffle: bool = True,
-                        rng: Optional[np.random.Generator] = None) -> dict:
-    """Same idea as bigram but with positional-decay context window.
+                        rng: Optional[np.random.Generator] = None,
+                        optimizer: str = 'adam',
+                        beta1: float = 0.9, beta2: float = 0.999,
+                        eps: float = 1e-8,
+                        weight_clip: Optional[float] = 5.0,
+                        chunk_pairs: int = 5000) -> dict:
+    """Positional-decay context-window n-gram trainer.
 
-    For predicting seq[i+1], the "active" inputs are:
-      seq[i]      at strength 1.0
-      seq[i-1]    at strength decay
-      seq[i-2]    at strength decay²
-      ...up to context_window
-    Score over vocab = sum over active inputs of W[input_row].
+    For predicting seq[i+1], active inputs:
+      seq[i]   at strength 1.0
+      seq[i-1] at strength decay
+      seq[i-2] at strength decay²  ...up to context_window
+
+    `optimizer='adam'` (default) — per-edge momentum + adaptive LR,
+    applied to substrate Hebbian/perceptron deltas (no gradients).
+    `optimizer='sgd'` — direct delta application.
+
+    `weight_clip=5.0` — clamp |W| ≤ 5 after each chunk of `chunk_pairs`
+    updates. Stops unbounded perceptron growth that breaks softmax.
     """
     if rng is None:
         rng = np.random.default_rng()
     order = rng.permutation(len(sequences)) if shuffle else np.arange(len(sequences))
 
+    if optimizer == 'adam':
+        if view.m is None:
+            view.m = np.zeros_like(view.W)
+        if view.v is None:
+            view.v = np.zeros_like(view.W)
+
     n_correct = 0
     n_pairs = 0
     delta = np.zeros_like(view.W)
 
+    def _apply_delta():
+        if optimizer == 'adam':
+            view.t += 1
+            view.m = beta1 * view.m + (1 - beta1) * delta
+            view.v = beta2 * view.v + (1 - beta2) * (delta * delta)
+            m_hat = view.m / (1 - beta1 ** view.t)
+            v_hat = view.v / (1 - beta2 ** view.t)
+            view.W += eta * m_hat / (np.sqrt(v_hat) + eps)
+        else:
+            view.W += eta * delta
+        if weight_clip is not None:
+            np.clip(view.W, -weight_clip, weight_clip, out=view.W)
+        delta.fill(0)
+
+    pair_in_chunk = 0
     for seq_idx in order:
         seq = sequences[seq_idx]
         if len(seq) < 2:
@@ -196,7 +227,6 @@ def train_ngram_epoch(view: LLMView, sequences: List[List[int]], *,
             if target_row is None:
                 continue
 
-            # Build active context (rows + weights)
             ctx_rows: List[int] = []
             ctx_weights: List[float] = []
             for back in range(context_window):
@@ -211,7 +241,6 @@ def train_ngram_epoch(view: LLMView, sequences: List[List[int]], *,
             if not ctx_rows:
                 continue
 
-            # Score = sum of weighted W[ctx_row] vectors
             scores = np.zeros(view.W.shape[1], dtype=np.float32)
             for r, w in zip(ctx_rows, ctx_weights):
                 scores += w * view.W[r]
@@ -221,14 +250,20 @@ def train_ngram_epoch(view: LLMView, sequences: List[List[int]], *,
             if pred == target_row:
                 n_correct += 1
             else:
-                # Distribute reward proportional to context strength
                 for r, w in zip(ctx_rows, ctx_weights):
                     delta[r, target_row] += w
                     if pred >= 0:
                         delta[r, pred] -= w
             n_pairs += 1
+            pair_in_chunk += 1
 
-    view.W += eta * delta
+            if pair_in_chunk >= chunk_pairs:
+                _apply_delta()
+                pair_in_chunk = 0
+
+    if pair_in_chunk > 0:
+        _apply_delta()
+
     return {
         'n_pairs': n_pairs,
         'n_correct': n_correct,
@@ -304,8 +339,16 @@ def generate_text(view: LLMView, tokenizer: WordTokenizer,
 
 
 def perplexity(view: LLMView, sequences: List[List[int]], *,
-                context_window: int = 4, decay: float = 0.6) -> float:
-    """Compute perplexity over `sequences` using softmax over W scores."""
+                context_window: int = 4, decay: float = 0.6,
+                softmax_temperature: float = 1.0,
+                prob_floor: float = 1e-8) -> float:
+    """Compute perplexity over `sequences` via temperature-scaled softmax.
+
+    With unbounded perceptron updates W can have huge dynamic range,
+    making softmax nearly one-hot. `softmax_temperature` controls
+    sharpness (>1 = softer, <1 = sharper). `prob_floor` clamps tiny
+    probabilities to avoid log(0) → inf.
+    """
     log_loss = 0.0
     n_pred = 0
 
@@ -330,15 +373,15 @@ def perplexity(view: LLMView, sequences: List[List[int]], *,
             scores = np.zeros(view.W.shape[1], dtype=np.float32)
             for r, w in zip(ctx_rows, ctx_weights):
                 scores += w * view.W[r]
-            # Softmax over vocab; need numerical stability
+            # Temperature-scaled softmax with numerical stability
+            scores = scores / max(1e-6, softmax_temperature)
             scores -= scores.max()
             exp_scores = np.exp(scores)
             denom = exp_scores.sum()
             if denom <= 0:
                 continue
             prob = exp_scores[target_row] / denom
-            if prob <= 0:
-                continue
+            prob = max(prob, prob_floor)
             log_loss += -math.log(prob)
             n_pred += 1
 
