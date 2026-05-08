@@ -36,12 +36,15 @@ CO_OCCURS = 'co_occurs'     # token ↔ token within the same sentence
 
 @dataclass
 class Vocab:
-    """token <-> neuron-id, plus POS-tag <-> neuron-id, plus slot positions."""
+    """token <-> neuron-id, plus POS-tag <-> neuron-id, plus slot positions,
+    plus step-position neurons (substrate's positional embeddings)."""
     token_to_id: Dict[str, int] = field(default_factory=dict)
     id_to_token: Dict[int, str] = field(default_factory=dict)
     pos_to_id: Dict[str, int] = field(default_factory=dict)
     id_to_pos: Dict[int, str] = field(default_factory=dict)
     slot_to_id: Dict[int, int] = field(default_factory=dict)  # position-index → neuron
+    step_to_id: Dict[int, int] = field(default_factory=dict)  # step-relative-to-prompt → neuron
+    id_to_step: Dict[int, int] = field(default_factory=dict)
 
     def add_token(self, token: str, brain: Brain) -> int:
         if token not in self.token_to_id:
@@ -62,6 +65,18 @@ class Vocab:
             nid = brain.add_neuron(lemma=f'slot:{position}', decay=0.7)
             self.slot_to_id[position] = nid
         return self.slot_to_id[position]
+
+    def add_step(self, position: int, brain: Brain) -> int:
+        """Position-step neuron — substrate's positional embedding.
+        Counts emissions relative to end of prompt (step_0 is the first
+        token to be emitted after the prompt). RL learns
+          step_i --co_occurs--> token  edges that route position-conditionally.
+        """
+        if position not in self.step_to_id:
+            nid = brain.add_neuron(lemma=f'step:{position}', decay=0.6)
+            self.step_to_id[position] = nid
+            self.id_to_step[nid] = position
+        return self.step_to_id[position]
 
     def __len__(self) -> int:
         return len(self.token_to_id)

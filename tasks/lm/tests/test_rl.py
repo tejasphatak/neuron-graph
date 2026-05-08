@@ -230,3 +230,58 @@ class TestRLTraining:
         # Substrate should have grown new edges from reward
         assert final_synapses > initial_synapses, \
             f'no edges grown: started {initial_synapses}, ended {final_synapses}'
+
+
+# ─── Positional embeddings (step neurons) ────────────────────────────────
+
+class TestPositionalEmbeddings:
+    """Step neurons are the substrate's positional embeddings — discrete
+    neurons (not continuous vectors) seeded as goals during generation
+    so their co_occurs edges to position-correct tokens fire throughout
+    the spread cycle."""
+
+    def test_step_neurons_created_on_demand(self):
+        """trace_generate must allocate step neurons up to max_new."""
+        brain, vocab = _seeded_brain()
+        # Initially no step neurons
+        assert len(vocab.step_to_id) == 0
+
+        rng = np.random.default_rng(0)
+        trace_generate(brain, vocab, CORPUS[0][:3], max_new=6,
+                        rng=rng, pos_sequence=POS, explore_eps=0.0)
+        # 6 step neurons should have been created
+        assert len(vocab.step_to_id) == 6
+        # Each step has its own neuron
+        assert set(vocab.step_to_id.keys()) == {0, 1, 2, 3, 4, 5}
+
+    def test_step_neurons_grow_co_occurs_via_rl(self):
+        """After RL training, step_i should have co_occurs edges to the
+        tokens emitted at position i — that's the substrate learning a
+        positional embedding from reward signal."""
+        brain, vocab = _seeded_brain()
+        from brain.tasks.lm.tiny import CO_OCCURS
+        rel_co = brain.relation_id[CO_OCCURS]
+
+        training_pairs = [(s[:3], s[3:], POS) for s in CORPUS]
+        train_rl(brain, vocab, training_pairs, epochs=50,
+                  eta=0.18, explore_eps_start=0.40, explore_eps_end=0.05,
+                  seed=0)
+
+        # step_0 (first emission after prompt = sentence position 3)
+        # should have co_occurs to NOUNs (fox, cat, bird) — the tokens
+        # that get emitted at that position across episodes
+        step0_id = vocab.step_to_id[0]
+        co_targets = set()
+        for syn in brain.synapses_of(step0_id):
+            if int(syn['relation']) == rel_co:
+                tid = int(syn['to_id'])
+                if tid in vocab.id_to_token:
+                    co_targets.add(vocab.id_to_token[tid])
+
+        # Substrate has GROWN at least one position-correct edge
+        assert len(co_targets) >= 1, \
+            f'step_0 has no co_occurs edges to tokens after RL: {co_targets}'
+        # And the targets should be drawn from the position-3 NOUNs
+        position_3_nouns = {'fox', 'cat', 'bird'}
+        assert co_targets & position_3_nouns, \
+            f'step_0 connected to wrong tokens: {co_targets} (expected ⊆ {position_3_nouns})'

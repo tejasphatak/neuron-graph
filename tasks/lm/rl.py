@@ -117,6 +117,11 @@ def trace_generate(brain: Brain, vocab: Vocab,
     steps: List[GenerationStep] = []
     out_tokens: List[str] = []
 
+    # Pre-allocate step neurons we expect to use this episode.
+    # step_i = the i-th emission AFTER the prompt (relative position).
+    for k in range(max_new):
+        vocab.add_step(k, brain)
+
     for step_idx in range(max_new):
         # Determine next POS:
         #  - if pos_sequence is given (training), look it up by absolute index
@@ -154,15 +159,21 @@ def trace_generate(brain: Brain, vocab: Vocab,
             if next_pos_nid is None:
                 break
 
-        # Spread from WM-seeded prompt
+        # Spread from WM-seeded prompt with positional embedding.
+        # Token seeds carry recent-context (positional decay) in WM.
+        # The step-position neuron is a GOAL (clamped throughout spread)
+        # so its co_occurs edges to position-correct tokens fire at full
+        # strength, providing the disambiguator that separates same-POS
+        # tokens at different sentence positions.
         wm = WorkingMemory(decay=wm_decay, max_size=64, floor=0.05)
         seed_dict = {nid: wm_decay ** offset
                       for offset, nid in enumerate(reversed(emitted_ids))}
         wm.absorb(seed_dict, gain=1.0)
 
+        cur_step_nid = vocab.step_to_id[step_idx]
         state = spread(brain, seeds=[],
                         working_memory=wm,
-                        goals=[next_pos_nid],
+                        goals=[next_pos_nid, cur_step_nid],
                         goal_strength=goal_strength,
                         max_steps=max_steps,
                         sparsity=1.0)
@@ -209,11 +220,16 @@ def trace_generate(brain: Brain, vocab: Vocab,
         else:
             best_id = max(candidates, key=lambda x: x[1])[0]
 
+        # Include the step neuron in seed_ids so credit assignment
+        # strengthens (step_i → emitted_token) edges via apply_correction.
+        seed_list = list(seed_dict.keys())
+        if cur_step_nid not in seed_list:
+            seed_list.append(cur_step_nid)
         steps.append(GenerationStep(
             emitted_id=best_id,
             activation=dict(state.activation),
             next_pos_nid=next_pos_nid,
-            seed_ids=list(seed_dict.keys()),
+            seed_ids=seed_list,
         ))
         out_tokens.append(vocab.id_to_token[best_id])
         emitted_ids.append(best_id)
@@ -275,18 +291,29 @@ def apply_correction(brain: Brain, vocab: Vocab,
         if emitted_lvl <= 0:
             continue
 
-        # Local context: last N seeds (most recent emissions).
-        # seed_ids is in chronological order (oldest first), so take tail.
-        recent_seeds = step.seed_ids[-context_window:] if context_window else step.seed_ids
-        # Positional weight: most-recent = 1.0, next = decay, then decay^2
+        # Local context: last N TOKEN seeds + step neuron at full strength.
+        # The step neuron is critical — it carries position info that lets
+        # 'fox' (step_0) and 'dog' (step_5) differentiate even when their
+        # token contexts overlap.
+        all_seeds = step.seed_ids
+        token_seeds = [s for s in all_seeds if s in vocab.id_to_token]
+        step_seeds = [s for s in all_seeds if s in vocab.id_to_step]
+
+        recent_tokens = token_seeds[-context_window:] if context_window else token_seeds
         wm_decay_assumed = 0.6  # matches trace_generate default
-        seed_strength = {nid: wm_decay_assumed ** offset
-                          for offset, nid in enumerate(reversed(recent_seeds))}
+        seed_strength: Dict[int, float] = {
+            nid: wm_decay_assumed ** offset
+            for offset, nid in enumerate(reversed(recent_tokens))
+        }
+        # Step neurons get full credit weight (they were seeded at 1.0)
+        for sid in step_seeds:
+            seed_strength[sid] = 1.0
 
         for nid, base_strength in seed_strength.items():
             if nid == emitted:
                 continue
-            if nid not in vocab.id_to_token:
+            # Allow tokens AND step neurons (substrate's positional embeddings)
+            if nid not in vocab.id_to_token and nid not in vocab.id_to_step:
                 continue
             if base_strength < co_threshold:
                 continue
