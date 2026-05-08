@@ -29,6 +29,7 @@ FOLLOWS = 'follows'
 IN_SLOT = 'in_slot'
 HAS_MEMBER = 'has_member'   # inverse of IS_A: POS → token
 HAS_FILLER = 'has_filler'   # inverse of IN_SLOT: slot → token
+CO_OCCURS = 'co_occurs'     # token ↔ token within the same sentence
 
 
 # ─── Vocabulary ────────────────────────────────────────────────────────────
@@ -85,6 +86,7 @@ def build_lm_brain() -> Tuple[Brain, Vocab]:
         (IN_SLOT,    1.0),
         (HAS_MEMBER, 0.3),
         (HAS_FILLER, 0.7),
+        (CO_OCCURS,  0.4),  # context disambiguator across multiple sentences
     ]
     brain._rebuild_relation_index()
     return brain, Vocab()
@@ -145,6 +147,21 @@ def teach_sentence(brain: Brain, vocab: Vocab,
         if i + 1 < n:
             _add_or_strengthen(brain, slot_ids[i], slot_ids[i + 1], FOLLOWS)
         _add_or_strengthen(brain, slot_ids[i], pos_ids[i], IS_A)
+
+    # Co-occurrence: every distinct token-pair in this sentence gets a
+    # (distance-decayed) bidirectional co_occurs edge. This is what
+    # lets the substrate disambiguate across sentences sharing grammar:
+    # "brown" co-occurs with "fox" (S1) but not "cat" (S2), so a prompt
+    # containing "brown" pulls "fox" via co_occurs even though both
+    # tokens have equally-strong has_filler edges from slot[3].
+    for i in range(n):
+        for j in range(n):
+            if i == j or tok_ids[i] == tok_ids[j]:
+                continue
+            distance = abs(i - j)
+            delta = 1.0 / distance
+            _add_or_strengthen(brain, tok_ids[i], tok_ids[j],
+                                CO_OCCURS, delta=delta)
 
 
 # ─── Generation via slot-walking ───────────────────────────────────────────
@@ -251,11 +268,21 @@ def generate_via_spread(brain: Brain, vocab: Vocab,
     out: List[str] = []
     current_slot_idx = len(emitted_ids) - 1  # last filled slot
 
+    rel_is_a = brain.relation_id[IS_A]
+
     for _ in range(max_new):
         next_slot_idx = current_slot_idx + 1
         next_slot_nid = vocab.slot_to_id.get(next_slot_idx)
         if next_slot_nid is None:
             break
+
+        # The slot's expected POS is itself a substrate fact — slot --is_a--> POS.
+        # Read it out so the candidate filter respects structural truth.
+        expected_pos_nid = None
+        for syn in brain.synapses_of(next_slot_nid):
+            if int(syn['relation']) == rel_is_a:
+                expected_pos_nid = int(syn['to_id'])
+                break
 
         # Working memory: last few emitted tokens with positional decay.
         # Most recent has strength 1.0; older entries decay back.
@@ -275,14 +302,25 @@ def generate_via_spread(brain: Brain, vocab: Vocab,
                         max_steps=max_steps,
                         sparsity=1.0)
 
-        # Read out: highest-activated token-neuron. The substrate's
-        # has_filler edge from the goal-clamped slot drives the right
-        # token's activation above its peers.
+        # Read-out: highest-activated TOKEN whose IS_A edge points to the
+        # slot's expected POS. The POS filter respects the substrate's
+        # own structural fact (slot --is_a--> POS); without it, raw
+        # activation noise from prompt-token carry-over can elect a
+        # wrong-POS token. has_filler from goal-clamped slot still
+        # drives the *correct* candidate's activation above its peers.
         best_id = None
         best_score = -1.0
         for nid, lvl in state.activation.items():
             if nid not in vocab.id_to_token:
                 continue
+            if expected_pos_nid is not None:
+                token_pos_match = any(
+                    int(syn['to_id']) == expected_pos_nid
+                    and int(syn['relation']) == rel_is_a
+                    for syn in brain.synapses_of(nid)
+                )
+                if not token_pos_match:
+                    continue
             if lvl > best_score:
                 best_score = lvl
                 best_id = nid

@@ -19,14 +19,23 @@ from brain.tasks.lm.tiny import (
 SENTENCE = "the quick brown fox jumps over the lazy dog".split()
 POS = ["DET", "ADJ", "ADJ", "NOUN", "VERB", "PREP", "DET", "ADJ", "NOUN"]
 
+# Multi-sentence corpus — same grammar shape, different fillers
+S1 = "the quick brown fox jumps over the lazy dog".split()
+S2 = "a smart small cat runs around a happy mouse".split()
+S3 = "the bold red bird flies past a tiny tree".split()
+CORPUS = [S1, S2, S3]
+# Same POS pattern across all three — that's the point of "shared grammar"
+SHARED_POS = ["DET", "ADJ", "ADJ", "NOUN", "VERB", "PREP", "DET", "ADJ", "NOUN"]
+
 
 # ─── Construction ────────────────────────────────────────────────────────
 
 class TestBuild:
-    def test_brain_has_five_relations(self):
+    def test_brain_has_six_relations(self):
         brain, _ = build_lm_brain()
         names = [r[0] for r in brain.relations]
-        assert names == ['is_a', 'follows', 'in_slot', 'has_member', 'has_filler']
+        assert names == ['is_a', 'follows', 'in_slot',
+                         'has_member', 'has_filler', 'co_occurs']
 
     def test_teach_creates_token_pos_slot_neurons(self):
         brain, vocab = build_lm_brain()
@@ -141,3 +150,94 @@ class TestIdempotence:
         # No edge weight should exceed cap (1.0)
         max_w = float(brain.synapses[:brain._used_synapses]['weight'].max())
         assert max_w <= 1.0 + 1e-6
+
+
+# ─── Multi-sentence shared-grammar composition ───────────────────────────
+
+class TestMultiSentence:
+    """The substrate is taught 3 sentences with the SAME grammar shape
+    (DET ADJ ADJ NOUN VERB PREP DET ADJ NOUN) but different vocabulary.
+    The substrate must disambiguate which sentence to continue based on
+    the prompt's tokens (via co_occurs edges)."""
+
+    @staticmethod
+    def _trained_brain():
+        brain, vocab = build_lm_brain()
+        for s in CORPUS:
+            teach_sentence(brain, vocab, s, SHARED_POS)
+        return brain, vocab
+
+    def test_corpus_creates_shared_slots_distinct_tokens(self):
+        brain, vocab = self._trained_brain()
+        # Slots are SHARED across sentences (only 9 of them, not 9×3)
+        assert len(vocab.slot_to_id) == 9
+        # POS tags are SHARED (5 unique tags)
+        assert len(vocab.pos_to_id) == 5
+        # Tokens are the union; some overlap ("the", "a") so < 27
+        assert len(vocab) > 9 and len(vocab) < 27
+
+    def test_each_sentence_reproducible_from_3tok_prompt(self):
+        """The defining test: substrate must continue each sentence
+        correctly when prompted with its first 3 tokens, even though
+        slots have multiple has_filler candidates."""
+        brain, vocab = self._trained_brain()
+        for sentence in CORPUS:
+            out = generate_via_spread(brain, vocab, sentence[:3], max_new=6)
+            assert out == sentence[3:], (
+                f'failed to continue {sentence[:3]!r}: '
+                f'got {out!r}, expected {sentence[3:]!r}'
+            )
+
+    def test_each_sentence_reproducible_from_2tok_prompt(self):
+        """Stricter: 2-token prompt has less context, must still route."""
+        brain, vocab = self._trained_brain()
+        for sentence in CORPUS:
+            out = generate_via_spread(brain, vocab, sentence[:2], max_new=7)
+            assert out == sentence[2:], (
+                f'failed to continue {sentence[:2]!r}: '
+                f'got {out!r}, expected {sentence[2:]!r}'
+            )
+
+    def test_lookup_method_also_handles_multi_sentence(self):
+        """The slot-walking generate() picks by joint IS_A × IN_SLOT score
+        without co_occurs. With multiple sentences, the same slot has
+        multiple fillers; lookup may not disambiguate. We document
+        whichever sentence's filler wins — this is the *contrast* with
+        spread-based generation that proves co_occurs is the disambiguator."""
+        brain, vocab = self._trained_brain()
+        # With S1 prompt, lookup picks SOME valid filler at each slot, but
+        # has no context to know which sentence to follow.
+        out = generate(brain, vocab, S1[:3], max_new=6)
+        # We don't assert exact reproduction here — we just assert that
+        # every emitted token has the correct POS for its slot
+        # (i.e. lookup is grammatically valid even if not S1-faithful).
+        for i, tok in enumerate(out):
+            slot_idx = 3 + i
+            expected_pos = SHARED_POS[slot_idx]
+            actual_pos = next(
+                (vocab.id_to_pos[int(syn['to_id'])]
+                 for syn in brain.synapses_of(vocab.token_to_id[tok])
+                 if int(syn['relation']) == brain.relation_id['is_a']
+                 and int(syn['to_id']) in vocab.id_to_pos),
+                None,
+            )
+            assert actual_pos == expected_pos, (
+                f'lookup emitted {tok!r} (POS {actual_pos}) at slot {slot_idx}, '
+                f'expected POS {expected_pos}'
+            )
+
+    def test_co_occurs_strength_separates_sentences(self):
+        """Sanity: 'brown' (S1) has co_occurs to 'fox' (S1) but NOT to
+        'cat' (S2) or 'bird' (S3). This is what disambiguates."""
+        brain, vocab = self._trained_brain()
+        brown = vocab.token_to_id['brown']
+        fox = vocab.token_to_id['fox']
+        cat = vocab.token_to_id['cat']
+
+        rel_co = brain.relation_id['co_occurs']
+        edges = brain.synapses_of(brown)
+        targets = {int(s['to_id']): float(s['weight'])
+                   for s in edges if int(s['relation']) == rel_co}
+
+        assert fox in targets, "'brown' should co_occur with 'fox' from S1"
+        assert cat not in targets, "'brown' should NOT co_occur with 'cat' (S2)"
