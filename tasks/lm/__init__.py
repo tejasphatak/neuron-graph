@@ -7,8 +7,9 @@ verify substrate reproduces the remaining 7. See `tiny.py`.
 """
 
 from .tiny import (
-    Vocab, build_lm_brain, teach_sentence, generate, generate_via_spread,
+    Vocab, build_lm_brain, teach_sentence,
+    generate, generate_via_spread, generate_open_vocab,
 )
 
 __all__ = ['Vocab', 'build_lm_brain', 'teach_sentence',
-           'generate', 'generate_via_spread']
+           'generate', 'generate_via_spread', 'generate_open_vocab']

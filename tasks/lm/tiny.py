@@ -335,6 +335,118 @@ def generate_via_spread(brain: Brain, vocab: Vocab,
     return out
 
 
+# ─── Open-vocabulary generation (no slots) ─────────────────────────────────
+
+def generate_open_vocab(brain, vocab, prompt_tokens, *,
+                         max_new: int = 20,
+                         wm_decay: float = 0.6,
+                         goal_strength: float = 2.0,
+                         max_steps: int = 2,
+                         antiloop_window: int = 2) -> List[str]:
+    """Open-vocabulary generation — NO slot anchoring. No fixed positions.
+
+    The substrate's POS-FOLLOWS edges (POS_i --follows--> POS_{i+1}) drive
+    transitions between grammatical classes. The substrate's co_occurs
+    edges drive token selection within a class. Slots play no role.
+
+    Per-step pipeline:
+      1. read last emitted token's POS (via its IS_A edge)
+      2. find next-POS via that POS's strongest FOLLOWS edge
+      3. spread with WM seeded by recent tokens, goal=next_pos
+      4. read out highest-activated token whose IS_A points to next_pos
+         (excluding the antiloop window of recent emissions)
+
+    Sentence length is bounded only by `max_new` — there is no sentence
+    boundary signal in this corpus. Adding a START/END token would be
+    the next refinement; for now `max_new` is the stop condition.
+
+    Pure-spread version (no POS-FOLLOWS, no goal) was tried first and
+    looped within a single POS class — has_member edges keep activation
+    circulating among same-class tokens with no transition signal. POS-
+    FOLLOWS is a substrate-stored fact about grammar, not a crutch.
+    """
+    if not prompt_tokens:
+        raise ValueError('prompt must contain at least one token')
+
+    rel_is_a = brain.relation_id[IS_A]
+    rel_follows = brain.relation_id[FOLLOWS]
+
+    emitted_ids: List[int] = []
+    for t in prompt_tokens:
+        nid = vocab.token_to_id.get(t)
+        if nid is None:
+            raise KeyError(f'Token not in vocab: {t!r}')
+        emitted_ids.append(nid)
+
+    out: List[str] = []
+
+    for _ in range(max_new):
+        # 1. Last emitted token's POS — substrate fact
+        last_id = emitted_ids[-1]
+        cur_pos_nid = None
+        for syn in brain.synapses_of(last_id):
+            if int(syn['relation']) == rel_is_a:
+                tid = int(syn['to_id'])
+                if tid in vocab.id_to_pos:
+                    cur_pos_nid = tid
+                    break
+        if cur_pos_nid is None:
+            break
+
+        # 2. Next POS via the strongest POS-FOLLOWS edge
+        next_pos_nid = None
+        best_w = -1.0
+        for syn in brain.synapses_of(cur_pos_nid):
+            if int(syn['relation']) == rel_follows:
+                w = float(syn['weight'])
+                if w > best_w:
+                    best_w = w
+                    next_pos_nid = int(syn['to_id'])
+        if next_pos_nid is None:
+            break  # current POS has no successor — sentence end
+
+        # 3. Spread from WM-seeded prompt with next-POS as goal
+        wm = WorkingMemory(decay=wm_decay, max_size=64, floor=0.05)
+        seeds = {nid: wm_decay ** offset
+                  for offset, nid in enumerate(reversed(emitted_ids))}
+        wm.absorb(seeds, gain=1.0)
+
+        state = spread(brain, seeds=[],
+                        working_memory=wm,
+                        goals=[next_pos_nid],
+                        goal_strength=goal_strength,
+                        max_steps=max_steps,
+                        sparsity=1.0)
+
+        # 4. Highest-activated token whose POS matches the goal
+        recent = set(emitted_ids[-antiloop_window:]) if antiloop_window else set()
+        best_id = None
+        best_score = -1.0
+        for nid, lvl in state.activation.items():
+            if nid not in vocab.id_to_token:
+                continue
+            if nid in recent:
+                continue
+            token_pos_match = any(
+                int(syn['to_id']) == next_pos_nid
+                and int(syn['relation']) == rel_is_a
+                for syn in brain.synapses_of(nid)
+            )
+            if not token_pos_match:
+                continue
+            if lvl > best_score:
+                best_score = lvl
+                best_id = nid
+
+        if best_id is None or best_score <= 0:
+            break
+
+        out.append(vocab.id_to_token[best_id])
+        emitted_ids.append(best_id)
+
+    return out
+
+
 # ─── Smoke main ─────────────────────────────────────────────────────────────
 
 def _smoke_main() -> int:
