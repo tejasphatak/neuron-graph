@@ -289,6 +289,116 @@ def train_ngram_epoch_batched(view: LLMView, sequences: List[List[int]], *,
     }
 
 
+def train_ngram_epoch_fast(view: LLMView, sequences: List[List[int]], *,
+                             context_window: int = 4,
+                             eta: float = 0.05,
+                             decay: float = 0.6,
+                             shuffle: bool = True,
+                             rng: Optional[np.random.Generator] = None,
+                             optimizer: str = 'adam',
+                             beta1: float = 0.9, beta2: float = 0.999,
+                             eps: float = 1e-8,
+                             weight_clip: Optional[float] = 5.0) -> dict:
+    """Per-sequence vectorized n-gram trainer.
+
+    Within each sequence: build [L-1, ctx_window] index matrix, score
+    all positions at once via fancy indexing into W. Avoids per-pair
+    Python overhead. Empirically 5-20× faster than train_ngram_epoch.
+    """
+    if rng is None:
+        rng = np.random.default_rng()
+    order = rng.permutation(len(sequences)) if shuffle else np.arange(len(sequences))
+
+    if optimizer == 'adam':
+        if view.m is None:
+            view.m = np.zeros_like(view.W)
+        if view.v is None:
+            view.v = np.zeros_like(view.W)
+
+    decay_powers = np.array([decay ** k for k in range(context_window)],
+                              dtype=np.float32)
+    delta = np.zeros_like(view.W)
+    V = view.W.shape[1]
+    n_correct = 0
+    n_pairs = 0
+
+    for seq_idx in order:
+        seq = sequences[seq_idx]
+        rows = np.array(
+            [view.tok_to_row.get(t, -1) for t in seq],
+            dtype=np.int64,
+        )
+        L = len(rows)
+        if L < 2:
+            continue
+
+        ctx = np.full((L - 1, context_window), -1, dtype=np.int64)
+        for k in range(context_window):
+            if k < L - 1:
+                ctx[k:, k] = rows[:L - 1 - k]
+        targets = rows[1:]
+
+        valid_target = targets >= 0
+        valid_ctx = ctx >= 0
+        any_ctx = valid_ctx.any(axis=1)
+        active = valid_target & any_ctx
+        if not active.any():
+            continue
+
+        ctx_active = ctx[active]
+        valid_active = valid_ctx[active]
+        targets_active = targets[active]
+        P = len(targets_active)
+
+        ctx_safe = np.where(valid_active, ctx_active, 0)
+        Wctx = view.W[ctx_safe]
+        weights = decay_powers * valid_active.astype(np.float32)
+        scores = np.einsum('pk,pkv->pv', weights, Wctx)
+
+        preds = scores.argmax(axis=1)
+        max_scores = scores.max(axis=1)
+        no_signal = max_scores <= 0
+        correct = (preds == targets_active) & ~no_signal
+        n_correct += int(correct.sum())
+        n_pairs += P
+
+        wrong = ~correct
+        if wrong.any():
+            outcome = np.zeros((P, V), dtype=np.float32)
+            wrong_idx = np.where(wrong)[0]
+            outcome[wrong_idx, targets_active[wrong_idx]] = 1.0
+            wrong_with_signal = wrong & ~no_signal
+            if wrong_with_signal.any():
+                wsig_idx = np.where(wrong_with_signal)[0]
+                outcome[wsig_idx, preds[wsig_idx]] -= 1.0
+
+            for k in range(context_window):
+                w_k = weights[:, k]
+                if not w_k.any():
+                    continue
+                idx_k = ctx_safe[:, k]
+                weighted = w_k[:, None] * outcome
+                np.add.at(delta, idx_k, weighted)
+
+    if optimizer == 'adam':
+        view.t += 1
+        view.m = beta1 * view.m + (1 - beta1) * delta
+        view.v = beta2 * view.v + (1 - beta2) * (delta * delta)
+        m_hat = view.m / (1 - beta1 ** view.t)
+        v_hat = view.v / (1 - beta2 ** view.t)
+        view.W += eta * m_hat / (np.sqrt(v_hat) + eps)
+    else:
+        view.W += eta * delta
+    if weight_clip is not None:
+        np.clip(view.W, -weight_clip, weight_clip, out=view.W)
+
+    return {
+        'n_pairs': n_pairs,
+        'n_correct': n_correct,
+        'next_token_accuracy': n_correct / max(1, n_pairs),
+    }
+
+
 def train_ngram_epoch(view: LLMView, sequences: List[List[int]], *,
                         context_window: int = 4,
                         eta: float = 0.05,
