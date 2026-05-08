@@ -15,7 +15,8 @@ sys.path.insert(0, _GURU)
 from brain.tasks.lm import build_lm_brain
 from brain.tasks.lm.rl import (
     teach_minimal, trace_generate, reward_trajectory,
-    apply_correction, train_rl, GenerationStep, Trajectory,
+    apply_correction, train_rl, train_rl_curriculum,
+    GenerationStep, Trajectory,
 )
 
 
@@ -230,6 +231,60 @@ class TestRLTraining:
         # Substrate should have grown new edges from reward
         assert final_synapses > initial_synapses, \
             f'no edges grown: started {initial_synapses}, ended {final_synapses}'
+
+
+# ─── Curriculum learning ─────────────────────────────────────────────────
+
+class TestCurriculum:
+    """Curriculum learning: train on subsets first, then expand. The
+    persistent replay buffer carries successful trajectories across
+    stages so earlier sentences aren't forgotten when new ones are
+    introduced."""
+
+    def test_curriculum_stages_history(self):
+        """History should be tagged with stage and stage_size."""
+        brain, vocab = _seeded_brain()
+        training_pairs = [(s[:3], s[3:], POS) for s in CORPUS]
+
+        history = train_rl_curriculum(
+            brain, vocab, training_pairs,
+            stages=2, epochs_per_stage=10, seed=0,
+        )
+        # 2 stages × 10 epochs = 20 history entries
+        assert len(history) == 20
+        # Each entry has stage and stage_size
+        for h in history:
+            assert 'stage' in h
+            assert 'stage_size' in h
+        # Stage sizes should be monotonically non-decreasing
+        sizes = [h['stage_size'] for h in history]
+        assert all(sizes[i] <= sizes[i+1] for i in range(len(sizes)-1))
+        # Final stage covers all training pairs
+        assert history[-1]['stage_size'] == len(training_pairs)
+
+    def test_curriculum_persistent_buffer_carries_across_stages(self):
+        """Across stages, replay buffer keeps growing — earlier
+        successful trajectories stay around to be replayed."""
+        brain, vocab = _seeded_brain()
+        training_pairs = [(s[:3], s[3:], POS) for s in CORPUS]
+
+        history = train_rl_curriculum(
+            brain, vocab, training_pairs,
+            stages=2, epochs_per_stage=20,
+            replay_min_reward=0.0,
+            seed=0,
+        )
+        # In stage 2, buffer_size at end should be > buffer_size at start
+        # of stage 1 (i.e. carried over)
+        stage1_end = max(i for i, h in enumerate(history) if h['stage'] == 0)
+        stage2_start_buf = history[stage1_end + 1]['buffer_size']
+        stage1_end_buf = history[stage1_end]['buffer_size']
+
+        # Persistent buffer: stage 2 starts where stage 1 left off
+        assert stage2_start_buf >= stage1_end_buf - 1, (
+            f'buffer not persisted: stage1_end={stage1_end_buf}, '
+            f'stage2_start={stage2_start_buf}'
+        )
 
 
 # ─── Positional embeddings (step neurons) ────────────────────────────────

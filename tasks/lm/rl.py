@@ -390,7 +390,8 @@ def train_rl(brain: Brain, vocab: Vocab,
               replay_per_step: int = 2,
               replay_eta_scale: float = 0.5,
               replay_min_reward: float = 0.5,
-              group_top_k: Optional[int] = None) -> List[Dict[str, float]]:
+              group_top_k: Optional[int] = None,
+              replay_buffer: Optional[ReplayBuffer] = None) -> List[Dict[str, float]]:
     """Each tuple = (prompt_tokens, target_continuation, full_pos_sequence).
 
     Replay buffer integration (NEW, scaled-corpus optimization):
@@ -416,7 +417,8 @@ def train_rl(brain: Brain, vocab: Vocab,
     py_rng = random.Random(seed)
     history: List[Dict[str, float]] = []
 
-    replay_buffer = ReplayBuffer(capacity=replay_capacity)
+    if replay_buffer is None:
+        replay_buffer = ReplayBuffer(capacity=replay_capacity)
 
     for epoch in range(epochs):
         frac = epoch / max(1, epochs - 1)
@@ -482,5 +484,82 @@ def train_rl(brain: Brain, vocab: Vocab,
                   f'r̄={total_reward/max(1,total_steps):+.3f}  '
                   f'ε={eps:.3f}  upd={ep_updated:4d}  new={ep_created:3d}  '
                   f'rpl={ep_replays}')
+
+    return history
+
+
+# ─── Curriculum learning ──────────────────────────────────────────────────
+
+def train_rl_curriculum(brain: Brain, vocab: Vocab,
+                          training_pairs: List[Tuple[List[str], List[str], List[str]]],
+                          *,
+                          stages: int = 4,
+                          epochs_per_stage: int = 100,
+                          eta: float = 0.18,
+                          explore_eps_start: float = 0.40,
+                          explore_eps_end: float = 0.02,
+                          seed: int = 0,
+                          verbose: bool = False,
+                          replay_capacity: int = 300,
+                          replay_per_step: int = 2,
+                          replay_eta_scale: float = 0.5,
+                          replay_min_reward: float = 0.0,
+                          group_top_k: Optional[int] = None
+                          ) -> List[Dict[str, float]]:
+    """Progressive subset curriculum.
+
+    Stage k trains on training_pairs[0 : ceil(N * (k+1)/stages)] for
+    epochs_per_stage epochs. The replay buffer PERSISTS across stages
+    so successful trajectories from earlier sentences keep getting
+    re-applied even as new sentences are introduced — fights
+    catastrophic interference when expanding the training set.
+
+    Rationale: at small scale (3 sentences) substrate hits 83%; at
+    20-sentence scale plain RL plateaus at ~40% because all sentences
+    fight for the same neuron weights at once. Curriculum lets the
+    substrate master smaller subsets first, then adapt those weights
+    when more diversity is introduced.
+    """
+    import math
+
+    n = len(training_pairs)
+    if n == 0:
+        return []
+
+    # Persistent replay buffer carries successful trajectories
+    # across all curriculum stages
+    persistent_buffer = ReplayBuffer(capacity=replay_capacity)
+
+    history: List[Dict[str, float]] = []
+
+    for stage in range(stages):
+        stage_size = max(1, math.ceil(n * (stage + 1) / stages))
+        stage_pairs = training_pairs[:stage_size]
+        stage_seed = seed + stage * 1000  # different stream per stage
+
+        if verbose:
+            print(f'  --- Stage {stage+1}/{stages}: {stage_size} sentences ---')
+
+        stage_history = train_rl(
+            brain, vocab, stage_pairs,
+            epochs=epochs_per_stage,
+            eta=eta,
+            explore_eps_start=explore_eps_start,
+            explore_eps_end=explore_eps_end,
+            seed=stage_seed,
+            verbose=False,
+            replay_per_step=replay_per_step,
+            replay_eta_scale=replay_eta_scale,
+            replay_min_reward=replay_min_reward,
+            group_top_k=group_top_k,
+            replay_buffer=persistent_buffer,
+        )
+        for h in stage_history:
+            h['stage'] = stage
+            h['stage_size'] = stage_size
+        history.extend(stage_history)
+        if verbose:
+            best_in_stage = max(stage_history, key=lambda h: h['accuracy'])
+            print(f'    stage {stage+1} best: {best_in_stage["accuracy"]:.1%}')
 
     return history
