@@ -25,7 +25,8 @@ import numpy as np
 
 from brain.tasks.llm.tokenizer import WordTokenizer
 from brain.tasks.llm.llm import (
-    build_llm_view, train_ngram_epoch, generate_text, perplexity,
+    build_llm_view, train_ngram_epoch, train_ngram_epoch_batched,
+    generate_text, perplexity,
 )
 
 

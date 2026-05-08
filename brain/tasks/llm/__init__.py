@@ -17,13 +17,13 @@ Local-trainable on CPU. Parallelizable across cores.
 from .tokenizer import WordTokenizer
 from .llm import (
     LLMVocab, build_llm_brain, build_llm_view, LLMView,
-    train_bigram_epoch, train_ngram_epoch,
+    train_bigram_epoch, train_ngram_epoch, train_ngram_epoch_batched,
     generate_text, perplexity,
 )
 
 __all__ = [
     'WordTokenizer',
     'LLMVocab', 'build_llm_brain', 'build_llm_view', 'LLMView',
-    'train_bigram_epoch', 'train_ngram_epoch',
+    'train_bigram_epoch', 'train_ngram_epoch', 'train_ngram_epoch_batched',
     'generate_text', 'perplexity',
 ]
