@@ -23,15 +23,15 @@ import random
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Tuple
 
-from .play_ttt import (
+from .game import (
     EMPTY, X, O, WIN_LINES, winner, is_full, legal_moves,
     build_brain, encode_state, TTTNeurons,
     GameOutcome, render_board,
 )
-from .play_ttt_curriculum import minimax_pick, evaluate_vs_minimax
-from .neuron import SYNAPSE_DTYPE
-from .store import Brain
-from .spread import spread
+from .curriculum import minimax_pick, evaluate_vs_minimax
+from brain.neuron import SYNAPSE_DTYPE
+from brain.store import Brain
+from brain.spread import spread
 from .world_model import (
     ensure_predict_relation, observe_transition, predict_next,
     PREDICT_RELATION,

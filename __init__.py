@@ -1,14 +1,24 @@
-"""Concept-as-Neuron substrate for Guru.
+"""Concept-as-Neuron substrate — domain-agnostic core.
 
-Phase A — small in-RAM brain with spreading activation + Hebbian learning.
-End-to-end demo: seed → spread → readout → teach → re-spread.
+This package is the REUSABLE substrate. Identity-bearing neurons,
+typed weighted edges, spreading activation, Hebbian + targeted
+plasticity, working memory, goal injection, modulatory layer, replay
+buffer, trace logging. No domain knowledge — those live under
+`brain.tasks.<task_name>`.
 
 Public API:
-    Brain                  — mutable in-RAM brain (store.py)
-    spread(brain, seeds)   — activation cycle (spread.py)
-    overlap_similarity     — similarity from activation patterns (spread.py)
-    hebbian_update         — Hebbian learning step (learn.py)
-    seed_brain()           — build the Phase A 50-neuron mini-brain (seed.py)
+    Brain            — mutable in-RAM brain (store)
+    spread()         — activation cycle (with optional WM + goals)
+    overlap_similarity — Jaccard overlap between two activation patterns
+    hebbian_update   — Hebbian co-activation strengthening
+    decay_all        — global synaptic decay
+    WorkingMemory    — sustained activation across calls
+    Modulator        — global plasticity scalar (dopamine analog)
+    ReplayBuffer     — episode ring + consolidate()
+    TraceLog         — append-only event log
+
+Domain demonstrations (TTT, bandit, world model, value head, planner,
+all the empirical proofs) live under `brain.tasks.ttt`.
 """
 
 from .neuron import (
@@ -18,19 +28,19 @@ from .neuron import (
 from .store import Brain
 from .spread import spread, overlap_similarity, ActivationState
 from .learn import hebbian_update, decay_all
-from .seed import seed_brain
 from .working_memory import WorkingMemory
 from .trace import TraceLog
 from .modulator import Modulator
 from .replay import ReplayBuffer, Episode, consolidate
 
 __all__ = [
-    # Substrate core
+    # Layout / types
     'NEURON_DTYPE', 'SYNAPSE_DTYPE', 'NEURON_SIZE', 'SYNAPSE_SIZE',
     'NeuronType', 'Modality', 'Flag',
+    # Substrate core
     'Brain', 'spread', 'overlap_similarity', 'ActivationState',
-    'hebbian_update', 'decay_all', 'seed_brain',
-    # New substrate primitives
+    'hebbian_update', 'decay_all',
+    # Working primitives
     'WorkingMemory', 'TraceLog', 'Modulator',
     'ReplayBuffer', 'Episode', 'consolidate',
 ]

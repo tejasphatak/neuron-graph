@@ -13,9 +13,10 @@ _GURU = os.path.dirname(os.path.dirname(_HERE))
 sys.path.insert(0, _GURU)
 
 from brain import (
-    Brain, seed_brain, spread, overlap_similarity,
+    Brain, spread, overlap_similarity,
     WorkingMemory, TraceLog, Modulator, ReplayBuffer, Episode, consolidate,
 )
+from brain.tasks.ttt.mini_seed import seed_brain
 
 
 # ─── Working memory ──────────────────────────────────────────────────────

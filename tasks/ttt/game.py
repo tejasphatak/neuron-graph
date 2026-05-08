@@ -40,9 +40,9 @@ import random
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Tuple
 
-from .store import Brain
-from .neuron import NeuronType, SYNAPSE_DTYPE
-from .spread import spread
+from brain.store import Brain
+from brain.neuron import NeuronType, SYNAPSE_DTYPE
+from brain.spread import spread
 
 
 # ─── TTT environment ──────────────────────────────────────────────────────

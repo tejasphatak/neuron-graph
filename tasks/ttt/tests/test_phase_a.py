@@ -14,13 +14,14 @@ import pytest
 
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
-_GURU = os.path.dirname(os.path.dirname(_HERE))
+_GURU = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(_HERE))))
 sys.path.insert(0, _GURU)
 
 from brain import (
     NEURON_DTYPE, NEURON_SIZE, SYNAPSE_DTYPE, SYNAPSE_SIZE,
-    Brain, seed_brain, spread, overlap_similarity, hebbian_update,
+    Brain, spread, overlap_similarity, hebbian_update,
 )
+from brain.tasks.ttt.mini_seed import seed_brain
 
 
 # ─── Layout invariants ───────────────────────────────────────────────────

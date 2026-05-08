@@ -41,13 +41,13 @@ from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 
-from .neuron import SYNAPSE_DTYPE
-from .play_ttt import (
+from brain.neuron import SYNAPSE_DTYPE
+from .game import (
     EMPTY, X, O, encode_state, build_brain, TTTNeurons,
     legal_moves, winner, is_full,
 )
-from .store import Brain
-from .spread import ActivationState
+from brain.store import Brain
+from brain.spread import ActivationState
 
 
 PREDICT_RELATION = 'predicts'

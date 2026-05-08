@@ -22,13 +22,13 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Dict, List, Optional, Tuple
 
-from .neuron import NeuronType, SYNAPSE_DTYPE
-from .play_ttt import (
+from brain.neuron import NeuronType, SYNAPSE_DTYPE
+from .game import (
     EMPTY, X, O, encode_state, winner, is_full, legal_moves,
     TTTNeurons, build_brain,
 )
-from .store import Brain
-from .spread import spread
+from brain.store import Brain
+from brain.spread import spread
 
 
 VALUE_RELATION = 'value'
@@ -318,13 +318,13 @@ def main():
     print('\n  Phase 2: planner using substrate value head, vs random + minimax')
     print('  ' + '─' * 60)
 
-    from .planning_agent import (
+    from .planner import (
         plan_one_step, evaluate_terminal, play_with_planning,
     )
-    from .play_ttt_curriculum import minimax_pick
+    from .curriculum import minimax_pick
 
     # Patch the planner to use substrate eval — call evaluate_state via injection
-    import brain.planning_agent as pa
+    import brain.tasks.ttt.planner as pa
     orig_eval = pa.evaluate_state
     pa.evaluate_state = lambda b, c: substrate_eval_with_lookahead(
         brain, neurons, outcomes, b, c

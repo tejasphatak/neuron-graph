@@ -13,7 +13,7 @@ from __future__ import annotations
 import os
 import tempfile
 
-from . import (
+from brain import (
     seed_brain, spread, hebbian_update,
     WorkingMemory, ReplayBuffer, consolidate, Episode,
 )

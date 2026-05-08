@@ -18,9 +18,9 @@ from .learn_bandit import (
     Bandit, build_agent_brain, softmax_choice, _edge_weight,
     TrialRecord,
 )
-from .replay import ReplayBuffer, consolidate, Episode
-from .neuron import SYNAPSE_DTYPE
-from .spread import spread
+from brain.replay import ReplayBuffer, consolidate, Episode
+from brain.neuron import SYNAPSE_DTYPE
+from brain.spread import spread
 
 
 def _targeted(brain, from_id, to_id, *, eta, reward):
@@ -33,7 +33,7 @@ def _targeted(brain, from_id, to_id, *, eta, reward):
         old = float(brain.synapses[idx]['weight'])
         brain.synapses[idx]['weight'] = max(0.0, min(1.0, old + delta))
     else:
-        from .store import Brain
+        from brain.store import Brain
         initial = max(0.0, min(1.0, 0.5 + delta))
         brain.add_synapse(from_id, to_id, rel_name='co_occurs', weight=initial)
 

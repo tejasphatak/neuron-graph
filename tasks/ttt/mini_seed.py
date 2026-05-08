@@ -12,8 +12,8 @@ from __future__ import annotations
 
 from typing import List, Tuple
 
-from .store import Brain
-from .neuron import NeuronType
+from brain.store import Brain
+from brain.neuron import NeuronType
 
 
 # (lemma, type, optional definition)

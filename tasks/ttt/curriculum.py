@@ -29,15 +29,15 @@ from typing import Callable, Dict, List, Optional, Tuple
 
 import numpy as np
 
-from .neuron import SYNAPSE_DTYPE
-from .play_ttt import (
+from brain.neuron import SYNAPSE_DTYPE
+from .game import (
     EMPTY, X, O, WIN_LINES,
     winner, is_full, legal_moves, render_board,
     build_brain, encode_state, agent_pick_action, credit_trajectory,
     TTTNeurons, GameOutcome,
 )
-from .store import Brain
-from .spread import spread
+from brain.store import Brain
+from brain.spread import spread
 
 
 # ─── Minimax (perfect player) ─────────────────────────────────────────────
@@ -245,7 +245,7 @@ def selfplay_from_clones(
         temp = 0.5 * (1.0 - progress) + 0.05  # already trained — explore less
 
         # Play one game with each brain on its color
-        from .play_ttt import play_self_play_game
+        from .game import play_self_play_game
         out = play_self_play_game(brain_x, neurons_x,
                                     brain_o, neurons_o,
                                     temperature=temp, rng=rng)

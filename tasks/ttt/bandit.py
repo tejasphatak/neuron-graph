@@ -47,10 +47,10 @@ from typing import List, Tuple
 
 import numpy as np
 
-from .store import Brain
-from .neuron import NeuronType
-from .spread import spread, ActivationState
-from .learn import hebbian_update
+from brain.store import Brain
+from brain.neuron import NeuronType
+from brain.spread import spread, ActivationState
+from brain.learn import hebbian_update
 
 
 # ─── Environment ──────────────────────────────────────────────────────────
@@ -208,7 +208,7 @@ def _targeted_update(brain: Brain, from_id: int, to_id: int, *,
     matches = (edges['to_id'] == to_id).nonzero()[0]
     if len(matches) > 0:
         # Modify in place — convert local index to absolute
-        from .neuron import SYNAPSE_DTYPE
+        from brain.neuron import SYNAPSE_DTYPE
         base = int(brain.nodes[from_id]['syn_offset']) // SYNAPSE_DTYPE.itemsize
         abs_idx = base + int(matches[0])
         old = float(brain.synapses[abs_idx]['weight'])

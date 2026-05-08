@@ -9,14 +9,14 @@ import sys
 import pytest
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
-_GURU = os.path.dirname(os.path.dirname(_HERE))
+_GURU = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(_HERE))))
 sys.path.insert(0, _GURU)
 
-from brain.play_ttt import (
+from brain.tasks.ttt.game import (
     EMPTY, X, O, build_brain, encode_state,
     legal_moves, winner,
 )
-from brain.world_model import (
+from brain.tasks.ttt.world_model import (
     ensure_predict_relation, observe_transition, predict_next,
     train_world_model, evaluate, collect_random_transitions,
     PREDICT_RELATION,

@@ -6,7 +6,7 @@ Run:
 
 from __future__ import annotations
 
-from . import seed_brain, spread, hebbian_update, overlap_similarity
+from brain import seed_brain, spread, hebbian_update, overlap_similarity
 
 
 def show(brain, state, label: str, k: int = 8) -> None:
@@ -83,7 +83,7 @@ def main():
     import tempfile, os
     with tempfile.TemporaryDirectory(prefix='brain_') as tmp:
         brain.save(tmp)
-        from .store import Brain
+        from brain.store import Brain
         reloaded = Brain.load(tmp)
         s_cat2 = spread(reloaded, [reloaded.lookup('cat')])
         sim_round_trip = overlap_similarity(s_cat, s_cat2)

@@ -26,13 +26,13 @@ import random
 from dataclasses import dataclass, field
 from typing import Dict, List, Tuple
 
-from .play_ttt import (
+from .game import (
     EMPTY, X, O, winner, is_full, legal_moves, render_board,
 )
-from .play_ttt_curriculum import minimax_pick, evaluate_vs_minimax
-from .neuron import NeuronType, SYNAPSE_DTYPE
-from .store import Brain
-from .spread import spread
+from .curriculum import minimax_pick, evaluate_vs_minimax
+from brain.neuron import NeuronType, SYNAPSE_DTYPE
+from brain.store import Brain
+from brain.spread import spread
 
 
 # ─── Neuron layout for shared brain ───────────────────────────────────────

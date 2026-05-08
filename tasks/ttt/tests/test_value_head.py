@@ -9,11 +9,11 @@ import sys
 import pytest
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
-_GURU = os.path.dirname(os.path.dirname(_HERE))
+_GURU = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(_HERE))))
 sys.path.insert(0, _GURU)
 
-from brain.play_ttt import EMPTY, X, O, build_brain, legal_moves
-from brain.value_head import (
+from brain.tasks.ttt.game import EMPTY, X, O, build_brain, legal_moves
+from brain.tasks.ttt.value_head import (
     ensure_value_relation, ensure_outcome_neurons,
     credit_value_trajectory, substrate_value,
     substrate_eval_with_lookahead, train_value_head_from_games,

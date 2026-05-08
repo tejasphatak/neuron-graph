@@ -9,16 +9,16 @@ import sys
 import pytest
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
-_GURU = os.path.dirname(os.path.dirname(_HERE))
+_GURU = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(_HERE))))
 sys.path.insert(0, _GURU)
 
-from brain.play_ttt import EMPTY, X, O, build_brain, legal_moves, winner
-from brain.planning_agent import (
+from brain.tasks.ttt.game import EMPTY, X, O, build_brain, legal_moves, winner
+from brain.tasks.ttt.planner import (
     plan_one_step, evaluate_state, evaluate_terminal,
     play_with_planning, evaluate_planner,
     two_in_a_row_lines,
 )
-from brain.world_model import (
+from brain.tasks.ttt.world_model import (
     ensure_predict_relation, observe_transition, train_world_model,
 )
 
@@ -147,7 +147,7 @@ class TestOnlineLearning:
         ensure_predict_relation(brain)
         rng = random.Random(0)
 
-        from brain.world_model import PREDICT_RELATION
+        from brain.tasks.ttt.world_model import PREDICT_RELATION
         rel_id = brain.relation_id[PREDICT_RELATION]
 
         before = sum(1 for s in brain.synapses[:getattr(brain, '_used_synapses', 0)]
