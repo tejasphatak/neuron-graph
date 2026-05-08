@@ -284,6 +284,52 @@ def reward_trajectory(traj: Trajectory, target: List[str],
     return rewards
 
 
+def btsp_credit(rewards: List[float], *,
+                 forward_gamma: float = 0.7,
+                 backward_gamma: float = 0.5) -> List[float]:
+    """BTSP-inspired bidirectional credit propagation.
+
+    Behavioral Timescale Synaptic Plasticity (Magee et al. 2017): a
+    synaptic input active SECONDS BEFORE OR AFTER the dendritic plateau
+    (the reward event) gets plasticity, weighted by temporal distance.
+    Classical Hebbian only credits coincident inputs (millisecond
+    window). BTSP extends this to a much wider behavioral-timescale
+    window — what we need for trajectory-level credit assignment.
+
+    For each step t we compute a credit value combining:
+      - forward γ-discounted future rewards: r_t + γ_f r_{t+1} + γ_f^2 r_{t+2} + ...
+      - backward γ-discounted past rewards : γ_b r_{t-1} + γ_b^2 r_{t-2} + ...
+    Sum becomes the effective reward for plasticity at step t. So a
+    success at step 5 propagates plasticity to nearby steps' synapses,
+    in BOTH directions, decaying by γ.
+
+    Returns one credit value per step, replacing the raw rewards in
+    apply_correction.
+    """
+    n = len(rewards)
+    if n == 0:
+        return []
+
+    # Forward: G^f_t = r_t + γ_f * G^f_{t+1}
+    forward = [0.0] * n
+    g = 0.0
+    for t in range(n - 1, -1, -1):
+        g = rewards[t] + forward_gamma * g
+        forward[t] = g
+
+    # Backward: G^b_t = γ_b * (r_{t-1} + γ_b * G^b_{t-1})
+    # i.e. credit from past rewards, decayed
+    backward = [0.0] * n
+    g = 0.0
+    for t in range(n):
+        backward[t] = backward_gamma * g
+        g = rewards[t] + backward_gamma * g
+
+    # Total credit = forward (looks ahead) + backward (looks back) - r_t
+    # (subtract r_t because both forward and backward include it once)
+    return [forward[t] + backward[t] - rewards[t] for t in range(n)]
+
+
 def apply_correction(brain: Brain, vocab: Vocab,
                       traj: Trajectory, rewards: List[float],
                       *, eta: float = 0.10,
@@ -391,7 +437,10 @@ def train_rl(brain: Brain, vocab: Vocab,
               replay_eta_scale: float = 0.5,
               replay_min_reward: float = 0.5,
               group_top_k: Optional[int] = None,
-              replay_buffer: Optional[ReplayBuffer] = None) -> List[Dict[str, float]]:
+              replay_buffer: Optional[ReplayBuffer] = None,
+              use_btsp: bool = False,
+              btsp_forward_gamma: float = 0.7,
+              btsp_backward_gamma: float = 0.5) -> List[Dict[str, float]]:
     """Each tuple = (prompt_tokens, target_continuation, full_pos_sequence).
 
     Replay buffer integration (NEW, scaled-corpus optimization):
@@ -439,7 +488,16 @@ def train_rl(brain: Brain, vocab: Vocab,
                                    group_top_k=group_top_k)
             rewards = reward_trajectory(traj, target)
             mean_r = sum(rewards) / max(1, len(rewards))
-            stats = apply_correction(brain, vocab, traj, rewards, eta=eta)
+            # BTSP-inspired bidirectional credit: each step's plasticity
+            # uses both past and future rewards (γ-discounted), not just
+            # the local step's reward. Models behavioral-timescale
+            # synaptic plasticity (Magee 2017).
+            credit_values = btsp_credit(
+                rewards,
+                forward_gamma=btsp_forward_gamma,
+                backward_gamma=btsp_backward_gamma,
+            ) if use_btsp else rewards
+            stats = apply_correction(brain, vocab, traj, credit_values, eta=eta)
 
             total_correct += sum(1 for a, b in zip(traj.output_tokens, target) if a == b)
             total_steps += len(target)
@@ -462,7 +520,12 @@ def train_rl(brain: Brain, vocab: Vocab,
                 for ep in samples:
                     past_traj = ep.metadata['full_traj']
                     past_rewards = ep.metadata['rewards']
-                    rs = apply_correction(brain, vocab, past_traj, past_rewards,
+                    past_credit = btsp_credit(
+                        past_rewards,
+                        forward_gamma=btsp_forward_gamma,
+                        backward_gamma=btsp_backward_gamma,
+                    ) if use_btsp else past_rewards
+                    rs = apply_correction(brain, vocab, past_traj, past_credit,
                                           eta=eta * replay_eta_scale)
                     ep_replays += 1
                     ep_updated += rs['updated']
@@ -504,7 +567,10 @@ def train_rl_curriculum(brain: Brain, vocab: Vocab,
                           replay_per_step: int = 2,
                           replay_eta_scale: float = 0.5,
                           replay_min_reward: float = 0.0,
-                          group_top_k: Optional[int] = None
+                          group_top_k: Optional[int] = None,
+                          use_btsp: bool = False,
+                          btsp_forward_gamma: float = 0.7,
+                          btsp_backward_gamma: float = 0.5
                           ) -> List[Dict[str, float]]:
     """Progressive subset curriculum.
 
@@ -553,6 +619,9 @@ def train_rl_curriculum(brain: Brain, vocab: Vocab,
             replay_min_reward=replay_min_reward,
             group_top_k=group_top_k,
             replay_buffer=persistent_buffer,
+            use_btsp=use_btsp,
+            btsp_forward_gamma=btsp_forward_gamma,
+            btsp_backward_gamma=btsp_backward_gamma,
         )
         for h in stage_history:
             h['stage'] = stage
