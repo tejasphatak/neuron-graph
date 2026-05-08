@@ -12,7 +12,7 @@ _GURU = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(_HERE)))
 sys.path.insert(0, _GURU)
 
 from brain.tasks.lm.tiny import (
-    Vocab, build_lm_brain, teach_sentence, generate,
+    Vocab, build_lm_brain, teach_sentence, generate, generate_via_spread,
 )
 
 
@@ -23,10 +23,10 @@ POS = ["DET", "ADJ", "ADJ", "NOUN", "VERB", "PREP", "DET", "ADJ", "NOUN"]
 # ─── Construction ────────────────────────────────────────────────────────
 
 class TestBuild:
-    def test_brain_has_three_relations(self):
+    def test_brain_has_five_relations(self):
         brain, _ = build_lm_brain()
         names = [r[0] for r in brain.relations]
-        assert names == ['is_a', 'follows', 'in_slot']
+        assert names == ['is_a', 'follows', 'in_slot', 'has_member', 'has_filler']
 
     def test_teach_creates_token_pos_slot_neurons(self):
         brain, vocab = build_lm_brain()
@@ -71,6 +71,47 @@ class TestGenerate:
         teach_sentence(brain, vocab, SENTENCE, POS)
         with pytest.raises(KeyError):
             generate(brain, vocab, ['nonexistent'], max_new=3)
+
+
+# ─── Substrate-native generation (spread-based) ──────────────────────────
+
+class TestGenerateViaSpread:
+    """The substrate's spreading activation does the composition.
+    Goal injection on the next slot + has_filler/has_member edges drives
+    the right token's activation above its peers."""
+
+    def test_reproduces_full_sentence(self):
+        brain, vocab = build_lm_brain()
+        teach_sentence(brain, vocab, SENTENCE, POS)
+        out = generate_via_spread(brain, vocab, SENTENCE[:2], max_new=7)
+        assert out == SENTENCE[2:]
+
+    def test_reproduces_from_single_token(self):
+        brain, vocab = build_lm_brain()
+        teach_sentence(brain, vocab, SENTENCE, POS)
+        out = generate_via_spread(brain, vocab, SENTENCE[:1], max_new=8)
+        assert out == SENTENCE[1:]
+
+    def test_stops_at_sentence_boundary(self):
+        brain, vocab = build_lm_brain()
+        teach_sentence(brain, vocab, SENTENCE, POS)
+        out = generate_via_spread(brain, vocab, SENTENCE[:2], max_new=50)
+        assert len(out) == 7
+
+    def test_unknown_prompt_token_raises(self):
+        brain, vocab = build_lm_brain()
+        teach_sentence(brain, vocab, SENTENCE, POS)
+        with pytest.raises(KeyError):
+            generate_via_spread(brain, vocab, ['nonexistent'], max_new=3)
+
+    def test_handles_repeated_token_in_sentence(self):
+        """The word 'the' appears at positions 0 and 6. Substrate-native
+        spreading must disambiguate via slot context, not collapse to one."""
+        brain, vocab = build_lm_brain()
+        teach_sentence(brain, vocab, SENTENCE, POS)
+        # Mid-sentence prompt: prove slot[5]→slot[6] picks "the" again
+        out = generate_via_spread(brain, vocab, SENTENCE[:6], max_new=3)
+        assert out == ['the', 'lazy', 'dog']
 
 
 # ─── Idempotence of teaching ─────────────────────────────────────────────

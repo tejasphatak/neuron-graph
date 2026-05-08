@@ -27,6 +27,8 @@ from brain import Brain, WorkingMemory, spread
 IS_A = 'is_a'
 FOLLOWS = 'follows'
 IN_SLOT = 'in_slot'
+HAS_MEMBER = 'has_member'   # inverse of IS_A: POS → token
+HAS_FILLER = 'has_filler'   # inverse of IN_SLOT: slot → token
 
 
 # ─── Vocabulary ────────────────────────────────────────────────────────────
@@ -67,11 +69,23 @@ class Vocab:
 # ─── Brain construction ────────────────────────────────────────────────────
 
 def build_lm_brain() -> Tuple[Brain, Vocab]:
-    """Brain wired with three relation types — class membership, sequence,
-    and slot binding. All weights ≈ 1.0 so spreading is undistorted by
-    relation-weight asymmetries."""
+    """Brain wired with five relation types:
+      is_a / has_member  — token ↔ POS (forward strong, inverse weaker)
+      in_slot / has_filler — token ↔ slot (forward strong, inverse strong)
+      follows            — sequence transitions
+
+    Asymmetric inverse weights matter: a POS has many members so
+    spreading from POS shouldn't swamp the network — has_member is
+    weaker than has_filler.
+    """
     brain = Brain()
-    brain.relations = [(IS_A, 1.0), (FOLLOWS, 1.0), (IN_SLOT, 1.0)]
+    brain.relations = [
+        (IS_A,       1.0),
+        (FOLLOWS,    0.8),
+        (IN_SLOT,    1.0),
+        (HAS_MEMBER, 0.3),
+        (HAS_FILLER, 0.7),
+    ]
     brain._rebuild_relation_index()
     return brain, Vocab()
 
@@ -112,17 +126,19 @@ def teach_sentence(brain: Brain, vocab: Vocab,
     pos_ids = [vocab.add_pos(p, brain) for p in pos_tags]
     slot_ids = [vocab.add_slot(i, brain) for i in range(n)]
 
-    # token --is_a--> POS
+    # token <--is_a/has_member--> POS
     for tid, pid in zip(tok_ids, pos_ids):
         _add_or_strengthen(brain, tid, pid, IS_A)
+        _add_or_strengthen(brain, pid, tid, HAS_MEMBER)
 
     # POS_i --follows--> POS_{i+1}
     for i in range(n - 1):
         _add_or_strengthen(brain, pos_ids[i], pos_ids[i + 1], FOLLOWS)
 
-    # token --in_slot--> slot[i]
+    # token <--in_slot/has_filler--> slot[i]
     for tid, sid in zip(tok_ids, slot_ids):
         _add_or_strengthen(brain, tid, sid, IN_SLOT)
+        _add_or_strengthen(brain, sid, tid, HAS_FILLER)
 
     # slot_i --follows--> slot_{i+1}, slot_i --is_a--> POS_i
     for i in range(n):
@@ -201,11 +217,90 @@ def generate(brain: Brain, vocab: Vocab,
     return out
 
 
+# ─── Substrate-native generation (via spread) ──────────────────────────────
+
+def generate_via_spread(brain: Brain, vocab: Vocab,
+                         prompt_tokens: List[str], *,
+                         max_new: int = 20,
+                         goal_strength: float = 2.0,
+                         max_steps: int = 2,
+                         wm_decay: float = 0.6) -> List[str]:
+    """Substrate-native generation: at each step, inject the next slot
+    as a goal, run spread() over the WM-seeded prompt context, read out
+    the highest-activated token-neuron.
+
+    The substrate's spreading does the work — slot/POS/token co-activation
+    via has_filler and has_member edges naturally surfaces the right token.
+    No direct edge lookup; pure activation pattern read-out.
+
+    Position is tracked externally because the substrate has no native
+    "what slot am I at" — that's a property of the *generation loop*, not
+    of the substrate itself. The substrate provides the activation field;
+    the loop chooses where to point it.
+    """
+    if not prompt_tokens:
+        raise ValueError('prompt must contain at least one token')
+
+    emitted_ids: List[int] = []
+    for t in prompt_tokens:
+        nid = vocab.token_to_id.get(t)
+        if nid is None:
+            raise KeyError(f'Token not in vocab: {t!r}')
+        emitted_ids.append(nid)
+
+    out: List[str] = []
+    current_slot_idx = len(emitted_ids) - 1  # last filled slot
+
+    for _ in range(max_new):
+        next_slot_idx = current_slot_idx + 1
+        next_slot_nid = vocab.slot_to_id.get(next_slot_idx)
+        if next_slot_nid is None:
+            break
+
+        # Working memory: last few emitted tokens with positional decay.
+        # Most recent has strength 1.0; older entries decay back.
+        # Note: we deliberately do NOT seed the current slot — the
+        # substrate is told only "where to go" (goal=next_slot), not
+        # "where you are." Otherwise current_slot's has_filler back-edge
+        # to the prompt token creates a loop that re-elects the prompt.
+        wm = WorkingMemory(decay=wm_decay, max_size=64, floor=0.05)
+        seeds = {nid: wm_decay ** offset
+                  for offset, nid in enumerate(reversed(emitted_ids))}
+        wm.absorb(seeds, gain=1.0)
+
+        state = spread(brain, seeds=[],
+                        working_memory=wm,
+                        goals=[next_slot_nid],
+                        goal_strength=goal_strength,
+                        max_steps=max_steps,
+                        sparsity=1.0)
+
+        # Read out: highest-activated token-neuron. The substrate's
+        # has_filler edge from the goal-clamped slot drives the right
+        # token's activation above its peers.
+        best_id = None
+        best_score = -1.0
+        for nid, lvl in state.activation.items():
+            if nid not in vocab.id_to_token:
+                continue
+            if lvl > best_score:
+                best_score = lvl
+                best_id = nid
+
+        if best_id is None or best_score <= 0:
+            break
+
+        out.append(vocab.id_to_token[best_id])
+        emitted_ids.append(best_id)
+        current_slot_idx = next_slot_idx
+
+    return out
+
+
 # ─── Smoke main ─────────────────────────────────────────────────────────────
 
 def _smoke_main() -> int:
-    """Teach POS + grammar shape + slot bindings for ONE sentence,
-    prompt with first 2 tokens, compose remaining 7."""
+    """Teach one sentence; compare both generation strategies."""
     sentence = "the quick brown fox jumps over the lazy dog".split()
     pos_tags = ["DET", "ADJ", "ADJ", "NOUN", "VERB", "PREP", "DET", "ADJ", "NOUN"]
 
@@ -214,18 +309,23 @@ def _smoke_main() -> int:
 
     prompt = sentence[:2]
     target = sentence[2:]
-    out = generate(brain, vocab, prompt, max_new=len(target))
+    out_lookup = generate(brain, vocab, prompt, max_new=len(target))
+    out_spread = generate_via_spread(brain, vocab, prompt, max_new=len(target))
 
     print(f'vocab size  : {len(vocab)} tokens, {len(vocab.pos_to_id)} POS tags, '
           f'{len(vocab.slot_to_id)} slots')
     print(f'brain neurons: {brain.size}  synapses: {getattr(brain, "_used_synapses", 0)}')
-    print(f'prompt      : {" ".join(prompt)}')
-    print(f'target      : {" ".join(target)}')
-    print(f'generated   : {" ".join(out)}')
-    n_correct = sum(1 for a, b in zip(target, out) if a == b)
-    print(f'accuracy    : {n_correct}/{len(target)} = {n_correct/len(target):.0%}')
+    print(f'prompt              : {" ".join(prompt)}')
+    print(f'target              : {" ".join(target)}')
+    print(f'generated (lookup)  : {" ".join(out_lookup)}')
+    print(f'generated (spread)  : {" ".join(out_spread)}')
 
-    return 0 if n_correct == len(target) else 1
+    n_lookup = sum(1 for a, b in zip(target, out_lookup) if a == b)
+    n_spread = sum(1 for a, b in zip(target, out_spread) if a == b)
+    print(f'accuracy (lookup)   : {n_lookup}/{len(target)} = {n_lookup/len(target):.0%}')
+    print(f'accuracy (spread)   : {n_spread}/{len(target)} = {n_spread/len(target):.0%}')
+
+    return 0 if (n_lookup == len(target) and n_spread == len(target)) else 1
 
 
 if __name__ == '__main__':
