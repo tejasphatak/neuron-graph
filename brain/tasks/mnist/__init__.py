@@ -13,9 +13,11 @@ from .mnist import (
     encode_image, predict, train_step, train_epoch,
     evaluate,
 )
+from .encoder import ImageEncoder, ImageEncoderVocab
 
 __all__ = [
     'MnistVocab', 'build_mnist_brain',
     'encode_image', 'predict', 'train_step', 'train_epoch',
     'evaluate',
+    'ImageEncoder', 'ImageEncoderVocab',
 ]

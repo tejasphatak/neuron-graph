@@ -1,30 +1,31 @@
-"""MNIST classification on the substrate.
+"""MNIST / image classification on the substrate.
 
 Architecture:
-  - 784 PIXEL neurons (28×28 grid), each represents one image position
-  - 10 DIGIT-CLASS neurons (digit_0 through digit_9)
-  - PIXEL --activates--> DIGIT  edges grown by supervised reward signal
+  - INPUT neurons: grid_size × grid_size × n_levels  (via ImageEncoder)
+  - OUTPUT neurons: 10 digit-class neurons
+  - INPUT --activates--> OUTPUT  edges grown by supervised reward
 
-Encoding (binary thresholding):
-  pixel intensity >= threshold → that pixel neuron is seeded at strength 1.0
-  pixel intensity < threshold  → not seeded (off)
+Encoder (default 16×16 grid × 4 levels = 1024 input neurons) gives:
+  - SCALE INVARIANCE: any image size → same fixed substrate dimensionality
+  - INTENSITY GRADIENT: 4 levels capture mid-tones, not just on/off
+  - SPARSITY: only one level fires per cell (one-hot per cell)
 
 Inference:
-  encode image → seed pixel neurons → spread() → argmax over digit neurons
+  encode image → seed input neurons → spread() → argmax over digit neurons
 
 Training (supervised reward):
   for each (image, label):
-    predict
-    if correct: strengthen (active_pixels → label) edges
-    if wrong:   weaken those edges, strengthen (active_pixels → correct_label)
+    predict via spread + argmax
+    if correct: strengthen (active_input → label) edges
+    if wrong:   weaken (active_input → predicted) AND
+                strengthen (active_input → correct_label)
 
 The substrate is essentially learning a sparse linear classifier in graph
-form. The point is: SAME primitives as TTT and LM, no architectural change.
+form. The point: SAME primitives as TTT and LM, no architectural change.
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Tuple
 
 import numpy as np
@@ -32,80 +33,72 @@ import numpy as np
 from brain import Brain, WorkingMemory, spread
 from brain.neuron import SYNAPSE_DTYPE
 
+from .encoder import ImageEncoder, ImageEncoderVocab
 
-ACTIVATES = 'activates'  # pixel → digit class
 
+ACTIVATES = 'activates'  # input → digit class
 
-# ─── Vocabulary ────────────────────────────────────────────────────────────
-
-@dataclass
-class MnistVocab:
-    """Maps pixel positions and digit classes to neuron ids."""
-    pixel_to_id: Dict[Tuple[int, int], int] = field(default_factory=dict)
-    id_to_pixel: Dict[int, Tuple[int, int]] = field(default_factory=dict)
-    digit_to_id: Dict[int, int] = field(default_factory=dict)
-    id_to_digit: Dict[int, int] = field(default_factory=dict)
+# Backward-compat alias
+MnistVocab = ImageEncoderVocab
 
 
 # ─── Brain construction ────────────────────────────────────────────────────
 
-def build_mnist_brain(image_size: int = 28) -> Tuple[Brain, MnistVocab]:
-    """Empty brain wired with pixel + digit neurons.
+def build_mnist_brain(image_size: int = 28,
+                       *, encoder: Optional[ImageEncoder] = None
+                       ) -> Tuple[Brain, ImageEncoderVocab, ImageEncoder]:
+    """Empty brain wired with input + digit class neurons.
 
-    No edges between them yet — those grow from supervised training.
+    Args:
+      image_size: kept for backward-compat; ignored when encoder is given
+      encoder: ImageEncoder; defaults to 16×16 × 4 levels (scale-invariant)
+
+    Returns (brain, vocab, encoder). The encoder is returned because
+    inference needs the same one used at training (same grid_size etc.).
     """
+    if encoder is None:
+        encoder = ImageEncoder(grid_size=16, n_levels=4)
+
     brain = Brain()
     brain.relations = [(ACTIVATES, 1.0)]
     brain._rebuild_relation_index()
 
-    vocab = MnistVocab()
-    # Pixel neurons (28×28 = 784)
-    for r in range(image_size):
-        for c in range(image_size):
-            nid = brain.add_neuron(lemma=f'px:{r},{c}', decay=0.5)
-            vocab.pixel_to_id[(r, c)] = nid
-            vocab.id_to_pixel[nid] = (r, c)
-    # Digit class neurons (0-9)
-    for d in range(10):
-        nid = brain.add_neuron(lemma=f'digit:{d}', decay=0.7)
-        vocab.digit_to_id[d] = nid
-        vocab.id_to_digit[nid] = d
-    return brain, vocab
+    vocab = encoder.build_vocab(brain)
+    return brain, vocab, encoder
 
 
-# ─── Encoding ──────────────────────────────────────────────────────────────
+# ─── Encoding (delegated) ──────────────────────────────────────────────────
 
-def encode_image(image: np.ndarray, vocab: MnistVocab,
-                  *, threshold: float = 0.5) -> Dict[int, float]:
-    """28×28 image (float [0,1]) → {pixel_neuron_id: 1.0} for active pixels.
+def encode_image(image: np.ndarray, vocab: ImageEncoderVocab,
+                  *, encoder: Optional[ImageEncoder] = None,
+                  threshold: float = 0.5) -> Dict[int, float]:
+    """image → seed dict via the encoder.
 
-    Binary thresholding for the simplest possible test. Could be extended
-    to multi-bin or graded activation later.
+    `threshold` is unused when an encoder is provided (kept for backward
+    compat with the old binary-pixel API).
     """
-    seeds: Dict[int, float] = {}
-    rows, cols = image.shape
-    on = image >= threshold
-    on_rows, on_cols = on.nonzero()
-    for r, c in zip(on_rows.tolist(), on_cols.tolist()):
-        seeds[vocab.pixel_to_id[(r, c)]] = 1.0
-    return seeds
+    if encoder is None:
+        # Legacy default — assumes vocab was built by an encoder we don't
+        # have a handle to. Caller should pass the encoder explicitly.
+        encoder = ImageEncoder(grid_size=16, n_levels=4)
+    return encoder.encode(image, vocab)
 
 
 # ─── Inference ─────────────────────────────────────────────────────────────
 
-def predict(brain: Brain, vocab: MnistVocab, image: np.ndarray, *,
+def predict(brain: Brain, vocab: ImageEncoderVocab, image: np.ndarray, *,
+             encoder: Optional[ImageEncoder] = None,
              threshold: float = 0.5,
              wm_decay: float = 0.5,
              max_steps: int = 2) -> Optional[int]:
     """image → predicted digit (argmax over digit class activations).
 
-    Returns None if no signal (blank image or untrained brain).
-    """
-    seeds = encode_image(image, vocab, threshold=threshold)
+    Returns None if no signal (blank image or untrained brain)."""
+    seeds = encode_image(image, vocab, encoder=encoder, threshold=threshold)
     if not seeds:
         return None
 
-    wm = WorkingMemory(decay=wm_decay, max_size=2048, floor=0.001)
+    wm = WorkingMemory(decay=wm_decay, max_size=4096, floor=0.001)
     wm.absorb(seeds, gain=1.0)
 
     state = spread(brain, seeds=[],
@@ -122,7 +115,7 @@ def predict(brain: Brain, vocab: MnistVocab, image: np.ndarray, *,
     return best_digit
 
 
-# ─── Edge mutation helpers ─────────────────────────────────────────────────
+# ─── Edge mutation helper ──────────────────────────────────────────────────
 
 def _strengthen(brain: Brain, from_id: int, to_id: int,
                   rel_name: str, delta: float, *, cap: float = 1.0) -> None:
@@ -143,23 +136,17 @@ def _strengthen(brain: Brain, from_id: int, to_id: int,
 
 # ─── Training ──────────────────────────────────────────────────────────────
 
-def train_step(brain: Brain, vocab: MnistVocab,
+def train_step(brain: Brain, vocab: ImageEncoderVocab,
                 image: np.ndarray, label: int, *,
+                encoder: Optional[ImageEncoder] = None,
                 eta: float = 0.10,
                 wrong_eta: float = 0.05,
                 threshold: float = 0.5) -> Tuple[bool, Optional[int]]:
-    """One supervised step:
-      - predict the digit
-      - if correct: strengthen (active_pixels → label) edges
-      - if wrong: weaken (active_pixels → predicted) AND strengthen
-        (active_pixels → correct_label)
-
-    Returns (was_correct, predicted_digit).
-    """
-    pred = predict(brain, vocab, image, threshold=threshold)
+    """One supervised step: predict, compare, update edges."""
+    pred = predict(brain, vocab, image, encoder=encoder, threshold=threshold)
     correct = (pred == label)
 
-    seeds = encode_image(image, vocab, threshold=threshold)
+    seeds = encode_image(image, vocab, encoder=encoder, threshold=threshold)
     if not seeds:
         return False, pred
 
@@ -167,32 +154,27 @@ def train_step(brain: Brain, vocab: MnistVocab,
     pred_nid = vocab.digit_to_id[pred] if pred is not None else None
 
     if correct:
-        # Reinforce active pixels → label
-        for pixel_nid in seeds:
-            _strengthen(brain, pixel_nid, label_nid, ACTIVATES, +eta)
+        for input_nid in seeds:
+            _strengthen(brain, input_nid, label_nid, ACTIVATES, +eta)
     else:
-        # Weaken active pixels → wrong predicted class
         if pred_nid is not None and pred_nid != label_nid:
-            for pixel_nid in seeds:
-                _strengthen(brain, pixel_nid, pred_nid, ACTIVATES, -wrong_eta)
-        # Strengthen active pixels → correct label
-        for pixel_nid in seeds:
-            _strengthen(brain, pixel_nid, label_nid, ACTIVATES, +eta)
+            for input_nid in seeds:
+                _strengthen(brain, input_nid, pred_nid, ACTIVATES, -wrong_eta)
+        for input_nid in seeds:
+            _strengthen(brain, input_nid, label_nid, ACTIVATES, +eta)
 
     return correct, pred
 
 
-def train_epoch(brain: Brain, vocab: MnistVocab,
+def train_epoch(brain: Brain, vocab: ImageEncoderVocab,
                   X: np.ndarray, y: np.ndarray, *,
+                  encoder: Optional[ImageEncoder] = None,
                   eta: float = 0.10,
                   wrong_eta: float = 0.05,
                   threshold: float = 0.5,
                   shuffle: bool = True,
                   rng: Optional[np.random.Generator] = None) -> float:
-    """One pass over the training set. Returns batch accuracy.
-    Note: accuracy is measured on PRE-update predictions (running tally),
-    which is more meaningful than post-hoc — it shows how the substrate
-    is performing as it learns."""
+    """One pass over the training set. Returns running accuracy."""
     if rng is None:
         rng = np.random.default_rng()
     n = len(X)
@@ -201,6 +183,7 @@ def train_epoch(brain: Brain, vocab: MnistVocab,
     n_correct = 0
     for idx in order:
         correct, _ = train_step(brain, vocab, X[idx], int(y[idx]),
+                                 encoder=encoder,
                                  eta=eta, wrong_eta=wrong_eta,
                                  threshold=threshold)
         n_correct += int(correct)
@@ -209,15 +192,16 @@ def train_epoch(brain: Brain, vocab: MnistVocab,
 
 # ─── Evaluation ────────────────────────────────────────────────────────────
 
-def evaluate(brain: Brain, vocab: MnistVocab,
+def evaluate(brain: Brain, vocab: ImageEncoderVocab,
               X: np.ndarray, y: np.ndarray, *,
+              encoder: Optional[ImageEncoder] = None,
               threshold: float = 0.5) -> Dict[str, float]:
-    """Run inference on (X, y) and return accuracy + confusion stats."""
+    """Run inference on (X, y); return accuracy + confusion stats."""
     n_correct = 0
     n_blank = 0
     confusion = np.zeros((10, 10), dtype=np.int64)
     for img, label in zip(X, y):
-        pred = predict(brain, vocab, img, threshold=threshold)
+        pred = predict(brain, vocab, img, encoder=encoder, threshold=threshold)
         if pred is None:
             n_blank += 1
             continue

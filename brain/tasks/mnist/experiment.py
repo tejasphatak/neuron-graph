@@ -52,44 +52,52 @@ def main():
     train_n = int(os.environ.get('TRAIN_N', '5000'))
     test_n = int(os.environ.get('TEST_N', '1000'))
     epochs = int(os.environ.get('EPOCHS', '5'))
-    threshold = float(os.environ.get('THRESHOLD', '0.5'))
-    eta = float(os.environ.get('ETA', '0.10'))
+    eta = float(os.environ.get('ETA', '0.05'))
+    grid = int(os.environ.get('GRID', '16'))
+    levels = int(os.environ.get('LEVELS', '4'))
+
+    from brain.tasks.mnist.encoder import ImageEncoder
+    encoder = ImageEncoder(grid_size=grid, n_levels=levels)
 
     data = load_mnist(train_n=train_n, test_n=test_n)
 
-    brain, vocab = build_mnist_brain(image_size=28)
-    print(f'Brain: {brain.size} neurons '
-          f'(784 pixel + 10 digit), '
+    brain, vocab, encoder = build_mnist_brain(encoder=encoder)
+    print(f'Encoder: {encoder.grid_size}×{encoder.grid_size} grid × '
+          f'{encoder.n_levels} levels = {encoder.n_input_neurons()} input neurons')
+    print(f'Brain: {brain.size} neurons total, '
           f'{getattr(brain, "_used_synapses", 0)} synapses (none yet — RL grows them)')
 
     # Cold-start eval
     cold = evaluate(brain, vocab, data['X_test'], data['y_test'],
-                     threshold=threshold)
+                     encoder=encoder)
     print(f'\nCold-start test accuracy: {cold["accuracy"]:.1%} '
           f'({cold["n_correct"]}/{cold["n_total"]}, {cold["n_blank"]} blank)')
 
     # Train
-    print(f'\n=== Training ({epochs} epochs, eta={eta}, threshold={threshold}) ===')
+    print(f'\n=== Training ({epochs} epochs, eta={eta}) ===')
     rng = np.random.default_rng(0)
+    best_test_acc = 0.0
     for ep in range(epochs):
         t0 = time.time()
         train_acc = train_epoch(brain, vocab,
                                   data['X_train'], data['y_train'],
-                                  eta=eta, threshold=threshold,
+                                  encoder=encoder, eta=eta,
                                   rng=rng)
         elapsed = time.time() - t0
-        # Periodic test eval
         test_eval = evaluate(brain, vocab,
                               data['X_test'], data['y_test'],
-                              threshold=threshold)
+                              encoder=encoder)
+        if test_eval['accuracy'] > best_test_acc:
+            best_test_acc = test_eval['accuracy']
         print(f'  ep {ep+1}/{epochs}  train_acc={train_acc:.1%}  '
               f'test_acc={test_eval["accuracy"]:.1%}  '
+              f'(best {best_test_acc:.1%})  '
               f'edges={getattr(brain, "_used_synapses", 0)}  '
               f'time={elapsed:.1f}s')
 
     # Final evaluation
     final = evaluate(brain, vocab, data['X_test'], data['y_test'],
-                      threshold=threshold)
+                      encoder=encoder)
     print(f'\n=== Final ===')
     print(f'  Test accuracy: {final["accuracy"]:.1%} '
           f'({final["n_correct"]}/{final["n_total"]})')
