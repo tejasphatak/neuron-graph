@@ -19,12 +19,13 @@ token-routing graph from reward alone.
 
 from __future__ import annotations
 
+import random
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 
-from brain import Brain, WorkingMemory, spread
+from brain import Brain, WorkingMemory, spread, ReplayBuffer, Episode
 
 from .tiny import (
     Vocab, build_lm_brain,
@@ -220,11 +221,12 @@ def trace_generate(brain: Brain, vocab: Vocab,
         else:
             best_id = max(candidates, key=lambda x: x[1])[0]
 
-        # Include the step neuron in seed_ids so credit assignment
-        # strengthens (step_i → emitted_token) edges via apply_correction.
-        seed_list = list(seed_dict.keys())
-        if cur_step_nid not in seed_list:
-            seed_list.append(cur_step_nid)
+        # Store seed_ids in CHRONOLOGICAL order (oldest first, most-
+        # recent last). apply_correction's `seed_ids[-context_window:]`
+        # then correctly takes the most-recent N tokens. The step neuron
+        # is appended at the end to also be credited.
+        seed_list = list(emitted_ids)  # already chronological
+        seed_list.append(cur_step_nid)
         steps.append(GenerationStep(
             emitted_id=best_id,
             activation=dict(state.activation),
@@ -355,26 +357,39 @@ def train_rl(brain: Brain, vocab: Vocab,
               explore_eps_start: float = 0.30,
               explore_eps_end: float = 0.02,
               seed: int = 0,
-              verbose: bool = False) -> List[Dict[str, float]]:
+              verbose: bool = False,
+              replay_capacity: int = 200,
+              replay_per_step: int = 2,
+              replay_eta_scale: float = 0.5,
+              replay_min_reward: float = 0.5) -> List[Dict[str, float]]:
     """Each tuple = (prompt_tokens, target_continuation, full_pos_sequence).
 
-    `full_pos_sequence` covers BOTH the prompt and the continuation —
-    it's teacher-forcing the grammar shape during training. Lets RL
-    focus on within-POS token routing, separately from POS prediction.
+    Replay buffer integration (NEW, scaled-corpus optimization):
+      - Successful trajectories (mean reward ≥ replay_min_reward) are
+        stored in a ReplayBuffer of capacity `replay_capacity`
+      - After each fresh episode, `replay_per_step` past trajectories
+        are sampled from the buffer and apply_correction is re-run on
+        them at `replay_eta_scale × eta` learning rate
+      - This fights catastrophic forgetting: training on sentence 20
+        no longer fully erases weights for sentences 1-3
+      - Same recipe that fixed TTT's value-head plateau
 
     Per epoch:
       for each (prompt, target, pos):
-        generate via trace_generate with pos_sequence forcing
-        score against target → per-step rewards
-        apply_correction strengthens/weakens edges
+        generate fresh trajectory
+        score → rewards → apply_correction
+        if successful: record to replay buffer
+        replay K past trajectories at reduced eta
 
-    Returns per-epoch stats: {epoch, accuracy, mean_reward, edges_created, ...}
+    Returns per-epoch stats including replay activity.
     """
     rng = np.random.default_rng(seed)
+    py_rng = random.Random(seed)
     history: List[Dict[str, float]] = []
 
+    replay_buffer = ReplayBuffer(capacity=replay_capacity)
+
     for epoch in range(epochs):
-        # Anneal ε from start to end across epochs (more exploration early)
         frac = epoch / max(1, epochs - 1)
         eps = explore_eps_start * (1 - frac) + explore_eps_end * frac
 
@@ -383,6 +398,7 @@ def train_rl(brain: Brain, vocab: Vocab,
         total_reward = 0.0
         ep_updated = 0
         ep_created = 0
+        ep_replays = 0
 
         for prompt, target, pos_seq in training_pairs:
             traj = trace_generate(brain, vocab, prompt,
@@ -390,6 +406,7 @@ def train_rl(brain: Brain, vocab: Vocab,
                                    rng=rng, explore_eps=eps,
                                    pos_sequence=pos_seq)
             rewards = reward_trajectory(traj, target)
+            mean_r = sum(rewards) / max(1, len(rewards))
             stats = apply_correction(brain, vocab, traj, rewards, eta=eta)
 
             total_correct += sum(1 for a, b in zip(traj.output_tokens, target) if a == b)
@@ -397,6 +414,27 @@ def train_rl(brain: Brain, vocab: Vocab,
             total_reward += sum(rewards)
             ep_updated += stats['updated']
             ep_created += stats['created']
+
+            # Record successful trajectories for replay
+            if mean_r >= replay_min_reward:
+                replay_buffer.record(
+                    trajectory=[(s, s.emitted_id) for s in traj.steps],
+                    reward=mean_r,
+                    full_traj=traj,
+                    rewards=list(rewards),
+                )
+
+            # Replay K past trajectories at reduced learning rate
+            if len(replay_buffer) >= 2 and replay_per_step > 0:
+                samples = replay_buffer.sample(replay_per_step, rng=py_rng)
+                for ep in samples:
+                    past_traj = ep.metadata['full_traj']
+                    past_rewards = ep.metadata['rewards']
+                    rs = apply_correction(brain, vocab, past_traj, past_rewards,
+                                          eta=eta * replay_eta_scale)
+                    ep_replays += 1
+                    ep_updated += rs['updated']
+                    ep_created += rs['created']
 
         accuracy = total_correct / max(1, total_steps)
         history.append({
@@ -406,10 +444,13 @@ def train_rl(brain: Brain, vocab: Vocab,
             'eps': eps,
             'updated': ep_updated,
             'created': ep_created,
+            'replays': ep_replays,
+            'buffer_size': len(replay_buffer),
         })
         if verbose:
             print(f'  ep {epoch:3d}  acc={accuracy:.2%}  '
                   f'r̄={total_reward/max(1,total_steps):+.3f}  '
-                  f'ε={eps:.3f}  upd={ep_updated:4d}  new={ep_created:3d}')
+                  f'ε={eps:.3f}  upd={ep_updated:4d}  new={ep_created:3d}  '
+                  f'rpl={ep_replays}')
 
     return history

@@ -101,7 +101,7 @@ def build_lm_brain() -> Tuple[Brain, Vocab]:
         (IN_SLOT,    1.0),
         (HAS_MEMBER, 0.3),
         (HAS_FILLER, 0.7),
-        (CO_OCCURS,  0.4),  # context disambiguator across multiple sentences
+        (CO_OCCURS,  0.4),   # context disambiguator across multiple sentences
     ]
     brain._rebuild_relation_index()
     return brain, Vocab()
