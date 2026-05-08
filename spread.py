@@ -46,6 +46,8 @@ def spread(
     working_memory: Optional[WorkingMemory] = None,
     goals: Optional[List[int]] = None,
     goal_strength: float = 1.0,
+    groups: Optional[Dict[int, int]] = None,
+    group_top_k: Optional[int] = None,
 ) -> ActivationState:
     """Run the activation cycle on `brain` from the given seed neuron ids.
 
@@ -62,6 +64,16 @@ def spread(
         goals: optional list of neuron ids kept clamped to `goal_strength`
             throughout the spread — top-down attention bias.
         goal_strength: clamp value for goal neurons (default 1.0)
+        groups: optional {neuron_id: group_id} partition. Used together
+            with `group_top_k` for sparsity-aware spread: within each
+            group, only the top-K activations survive each step. Lets a
+            task declare functional partitions (e.g. POS classes for LM,
+            cell positions for TTT, pixel regions for vision) so spread
+            doesn't fan out activation across all members of a noisy
+            class. Modality-agnostic — substrate provides the mechanism,
+            the task picks the partition.
+        group_top_k: number of top-activated members to keep per group
+            each step. None means no group-level sparsity (default).
 
     Returns:
         ActivationState with the final activation map.
@@ -123,6 +135,30 @@ def spread(
             next_act = {nid: lvl for nid, lvl in items if lvl > 0}
             for gid in goal_set:
                 next_act[gid] = goal_strength
+
+            # GROUP-LEVEL SPARSITY: within each declared group, keep only
+            # top group_top_k members. Prevents the "firehose" where a
+            # large class (many POS-NOUNs, many pixels of same row, etc.)
+            # all pump activation equally and drown sentence-specific or
+            # location-specific signals. Goals stay protected.
+            if groups is not None and group_top_k is not None and group_top_k > 0:
+                grouped: Dict[int, List[Tuple[int, float]]] = {}
+                ungrouped: Dict[int, float] = {}
+                for nid, lvl in next_act.items():
+                    g = groups.get(nid)
+                    if g is None:
+                        ungrouped[nid] = lvl
+                    else:
+                        grouped.setdefault(g, []).append((nid, lvl))
+                pruned: Dict[int, float] = dict(ungrouped)
+                for g, members in grouped.items():
+                    members.sort(key=lambda x: -x[1])
+                    for nid, lvl in members[:group_top_k]:
+                        pruned[nid] = lvl
+                # Re-protect goals (some might have been pruned out of group)
+                for gid in goal_set:
+                    pruned[gid] = goal_strength
+                next_act = pruned
 
         # CONVERGE: L1 difference of activation maps
         diff = _l1_diff(prev_activation, next_act)

@@ -79,6 +79,26 @@ class Trajectory:
     output_tokens: List[str]
 
 
+def _build_pos_groups(brain: Brain, vocab: Vocab) -> Dict[int, int]:
+    """Build a {token_neuron_id: pos_neuron_id} group map.
+
+    For sparsity-aware spread: tokens that share a POS form a group;
+    `spread()` will only keep the top-K most-activated tokens per POS
+    class each step, instead of firehose-pumping every member of every
+    POS class via has_member edges.
+    """
+    rel_is_a = brain.relation_id[IS_A]
+    groups: Dict[int, int] = {}
+    for tid in vocab.id_to_token:
+        for syn in brain.synapses_of(tid):
+            if int(syn['relation']) == rel_is_a:
+                pid = int(syn['to_id'])
+                if pid in vocab.id_to_pos:
+                    groups[tid] = pid
+                    break
+    return groups
+
+
 def trace_generate(brain: Brain, vocab: Vocab,
                     prompt_tokens: List[str], *,
                     max_new: int = 20,
@@ -88,7 +108,8 @@ def trace_generate(brain: Brain, vocab: Vocab,
                     antiloop_window: int = 2,
                     rng: Optional[np.random.Generator] = None,
                     explore_eps: float = 0.1,
-                    pos_sequence: Optional[List[str]] = None) -> Trajectory:
+                    pos_sequence: Optional[List[str]] = None,
+                    group_top_k: Optional[int] = None) -> Trajectory:
     """Like generate_open_vocab but records per-step substrate state.
 
     `explore_eps` adds ε-greedy exploration: with probability `explore_eps`
@@ -122,6 +143,11 @@ def trace_generate(brain: Brain, vocab: Vocab,
     # step_i = the i-th emission AFTER the prompt (relative position).
     for k in range(max_new):
         vocab.add_step(k, brain)
+
+    # Build the POS-class group map ONCE per generate call. Substrate
+    # uses it for sparsity-aware spread — within each POS class, only
+    # the top-K most-activated tokens survive each spread step.
+    pos_groups = _build_pos_groups(brain, vocab) if group_top_k else None
 
     for step_idx in range(max_new):
         # Determine next POS:
@@ -177,7 +203,9 @@ def trace_generate(brain: Brain, vocab: Vocab,
                         goals=[next_pos_nid, cur_step_nid],
                         goal_strength=goal_strength,
                         max_steps=max_steps,
-                        sparsity=1.0)
+                        sparsity=1.0,
+                        groups=pos_groups,
+                        group_top_k=group_top_k)
 
         # Candidate set: tokens whose IS_A points to next_pos_nid,
         # excluding the antiloop window
@@ -361,7 +389,8 @@ def train_rl(brain: Brain, vocab: Vocab,
               replay_capacity: int = 200,
               replay_per_step: int = 2,
               replay_eta_scale: float = 0.5,
-              replay_min_reward: float = 0.5) -> List[Dict[str, float]]:
+              replay_min_reward: float = 0.5,
+              group_top_k: Optional[int] = None) -> List[Dict[str, float]]:
     """Each tuple = (prompt_tokens, target_continuation, full_pos_sequence).
 
     Replay buffer integration (NEW, scaled-corpus optimization):
@@ -404,7 +433,8 @@ def train_rl(brain: Brain, vocab: Vocab,
             traj = trace_generate(brain, vocab, prompt,
                                    max_new=len(target),
                                    rng=rng, explore_eps=eps,
-                                   pos_sequence=pos_seq)
+                                   pos_sequence=pos_seq,
+                                   group_top_k=group_top_k)
             rewards = reward_trajectory(traj, target)
             mean_r = sum(rewards) / max(1, len(rewards))
             stats = apply_correction(brain, vocab, traj, rewards, eta=eta)

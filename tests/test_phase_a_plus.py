@@ -84,6 +84,62 @@ class TestGoalInjection:
         assert s.activation.get(physics, 0.0) == 0.0
 
 
+# ─── Group-aware sparsity (modality-agnostic) ────────────────────────────
+
+class TestGroupSparsity:
+    """spread() supports task-supplied {neuron_id: group_id} partitions.
+    Within each group, only the top group_top_k members survive each
+    step. Lets a task limit firehose effects of large classes (POS in
+    LM, cell positions in TTT, pixel rows in vision)."""
+
+    def test_group_top_k_prunes_within_group(self):
+        b = seed_brain()
+        # Create an artificial group: claim cat/dog/animal all belong to
+        # group 1 (and bird belongs to group 2)
+        cat = b.lookup('cat')
+        dog = b.lookup('dog')
+        animal = b.lookup('animal')
+        bird = b.lookup('bird')
+        groups = {cat: 1, dog: 1, animal: 1, bird: 2}
+
+        # Spread from cat — animal/dog/bird all activate via cat's relations
+        s_no_group = spread(b, [cat])
+        s_with_group = spread(b, [cat], groups=groups, group_top_k=1)
+
+        # Without group sparsity, multiple group-1 members should be active
+        g1_active_before = sum(1 for nid in (cat, dog, animal)
+                                if s_no_group.activation.get(nid, 0) > 0)
+
+        g1_active_after = sum(1 for nid in (cat, dog, animal)
+                               if s_with_group.activation.get(nid, 0) > 0)
+
+        # Group sparsity should reduce active members of group 1
+        assert g1_active_after <= g1_active_before
+        assert g1_active_after <= 1  # only top 1 of group 1 survives
+
+    def test_group_sparsity_protects_goals(self):
+        """Goals must stay active even if their group's top-K excludes them."""
+        b = seed_brain()
+        cat = b.lookup('cat')
+        animal = b.lookup('animal')
+        # Force animal and cat into same group
+        groups = {cat: 1, animal: 1}
+        # Goal = animal even though cat probably has higher activation
+        s = spread(b, [cat], goals=[animal], goal_strength=1.5,
+                    groups=groups, group_top_k=1)
+        # animal must still be present despite group_top_k=1 — goals override
+        assert animal in s.activation
+        assert s.activation[animal] >= 1.0
+
+    def test_no_groups_passes_through(self):
+        """When groups=None, behavior is identical to old spread()."""
+        b = seed_brain()
+        s_default = spread(b, [b.lookup('cat')])
+        s_explicit_none = spread(b, [b.lookup('cat')],
+                                  groups=None, group_top_k=None)
+        assert set(s_default.activation.keys()) == set(s_explicit_none.activation.keys())
+
+
 # ─── Trace log ───────────────────────────────────────────────────────────
 
 class TestTraceLog:
