@@ -20,7 +20,7 @@ from brain.tasks.mnist.mnist import build_mnist_brain
 from brain.tasks.mnist.encoder import ImageEncoder
 from brain.tasks.mnist.fast import (
     build_dense_view, sync_dense_to_brain,
-    fast_train_epoch, fast_evaluate,
+    fast_train_epoch, fast_evaluate, verify_substrate_learning,
 )
 
 
@@ -55,10 +55,11 @@ def main():
     train_n = int(os.environ.get('TRAIN_N', '5000'))
     test_n = int(os.environ.get('TEST_N', '1000'))
     epochs = int(os.environ.get('EPOCHS', '5'))
-    eta = float(os.environ.get('ETA', '0.05'))
+    eta = float(os.environ.get('ETA', '0.01'))
     grid = int(os.environ.get('GRID', '16'))
     levels = int(os.environ.get('LEVELS', '4'))
     batch_size = int(os.environ.get('BATCH', '64'))
+    optimizer = os.environ.get('OPT', 'adam')
 
     encoder = ImageEncoder(grid_size=grid, n_levels=levels)
 
@@ -77,7 +78,7 @@ def main():
           f'({cold["n_correct"]}/{cold["n_total"]}, {cold["n_blank"]} blank)')
 
     # Train
-    print(f'\n=== Training ({epochs} epochs, eta={eta}, batch={batch_size}) ===')
+    print(f'\n=== Training ({epochs} epochs, eta={eta}, batch={batch_size}, opt={optimizer}) ===')
     rng = np.random.default_rng(0)
     best_test_acc = 0.0
     for ep in range(epochs):
@@ -86,6 +87,7 @@ def main():
                                        data['X_train'], data['y_train'],
                                        vocab=vocab, encoder=encoder,
                                        eta=eta, batch_size=batch_size,
+                                       optimizer=optimizer,
                                        rng=rng)
         elapsed = time.time() - t0
         test_eval = fast_evaluate(view, data['X_test'], data['y_test'],
@@ -97,10 +99,21 @@ def main():
               f'(best {best_test_acc:.1%})  '
               f'time={elapsed:.1f}s')
 
-    # Sync dense view back to substrate edges (so spread()-based queries see them)
-    sync_dense_to_brain(brain, view)
-    print(f'\nSynced dense view → substrate. '
-          f'Edges in substrate: {getattr(brain, "_used_synapses", 0)}')
+    # Verify the SUBSTRATE itself learned — sync W → edges, then run
+    # spread()-based predict on a sample and compare to fast_predict.
+    print(f'\n=== Verifying substrate learning (spread() vs fast path) ===')
+    verify = verify_substrate_learning(
+        brain, vocab, encoder, view,
+        data['X_test'], data['y_test'],
+        n_samples=200,
+    )
+    print(f'  N samples: {verify["n_samples"]}')
+    print(f'  fast_predict accuracy   : {verify["fast_accuracy"]:.1%}')
+    print(f'  spread() accuracy       : {verify["substrate_accuracy"]:.1%}')
+    print(f'  match rate (same preds) : {verify["fast_predict_matches_substrate"]:.1%}')
+    print(f'  → substrate edges encode the learning (match rate near 1.0 confirms)')
+    print(f'  → fast path is just a faster *layout* of the same edge weights')
+    print(f'  Edges in substrate: {getattr(brain, "_used_synapses", 0)}')
 
     # Final evaluation
     final = fast_evaluate(view, data['X_test'], data['y_test'],

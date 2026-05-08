@@ -38,11 +38,23 @@ ACTIVATES = 'activates'
 class DenseView:
     """Dense W[n_inputs, n_outputs] matrix kept in sync with substrate
     ACTIVATES edges. After training, sync back to the substrate so
-    edges reflect the learned weights."""
+    edges reflect the learned weights.
+
+    Optional Adam-style optimizer state per-edge:
+      m  = first-moment (momentum) of update deltas
+      v  = second-moment (squared-update) accumulator
+    Lets us apply Adam-style smoothing to substrate edge updates —
+    not "Adam over backprop" (no gradients), but "Adam over Hebbian/
+    perceptron deltas." Same convergence-stabilization tricks.
+    """
     W: np.ndarray                       # [n_inputs, 10] float32
     input_id_to_idx: Dict[int, int]     # neuron_id → row in W
     input_idx_to_id: List[int]          # row → neuron_id
     digit_ids: List[int]                # column index → digit neuron_id
+    # Adam state (lazy-allocated when first used)
+    m: Optional[np.ndarray] = None
+    v: Optional[np.ndarray] = None
+    t: int = 0                           # step counter for bias correction
 
 
 def build_dense_view(brain: Brain,
@@ -80,11 +92,18 @@ def build_dense_view(brain: Brain,
 
 
 def sync_dense_to_brain(brain: Brain, view: DenseView) -> None:
-    """Write W back to substrate edges. Call once at end of training
-    so the substrate is up to date for spread()-based queries."""
+    """Write W back to substrate edges WITHOUT clamping or skipping
+    negatives. Substrate's synapse.weight is float32 — negative weights
+    are valid (they mean inhibitory: 'this active input votes AGAINST
+    this output class'). Skipping/clamping them would silently corrupt
+    the learned model — verify_substrate_learning would diverge from
+    fast_predict.
+
+    Only edges with weight EXACTLY 0 are skipped to keep substrate
+    sparse — those carry no signal anyway.
+    """
     rel_act = brain.relation_id[ACTIVATES]
     for row, input_nid in enumerate(view.input_idx_to_id):
-        # Existing edges from this input
         edges = brain.synapses_of(input_nid)
         existing = {}
         base = int(brain.nodes[input_nid]['syn_offset']) // SYNAPSE_DTYPE.itemsize
@@ -94,17 +113,16 @@ def sync_dense_to_brain(brain: Brain, view: DenseView) -> None:
 
         for col, digit_nid in enumerate(view.digit_ids):
             w = float(view.W[row, col])
-            if w <= 0:
-                # Skip zero/negative — leave existing edge if any (decayed)
+            if w == 0.0:
                 if digit_nid in existing:
                     brain.synapses[existing[digit_nid]]['weight'] = 0.0
                 continue
             if digit_nid in existing:
-                brain.synapses[existing[digit_nid]]['weight'] = min(1.0, w)
+                brain.synapses[existing[digit_nid]]['weight'] = w
             else:
                 brain.add_synapse(input_nid, digit_nid,
                                    rel_name=ACTIVATES,
-                                   weight=min(1.0, w))
+                                   weight=w)
 
 
 # ─── Fast batched encode ───────────────────────────────────────────────────
@@ -149,24 +167,31 @@ def fast_train_epoch(view: DenseView,
                       shuffle: bool = True,
                       rng: Optional[np.random.Generator] = None,
                       cap: Optional[float] = None,
-                      perceptron: bool = True) -> float:
+                      perceptron: bool = True,
+                      optimizer: str = 'sgd',
+                      beta1: float = 0.9,
+                      beta2: float = 0.999,
+                      eps: float = 1e-8) -> float:
     """Vectorized supervised training over one epoch.
 
-    `perceptron=True` (default): classical perceptron update — only
-    update on errors. W[active, correct] += eta; W[active, wrong] -= eta.
-    Stable on large corpora. ~92% on MNIST is achievable.
-
-    `perceptron=False`: always update. Saturates fast on large corpora;
-    OK only with low eta and a generous cap.
-
-    `cap=None`: no weight clamp (lets the substrate's edge weights
-    encode actual differences). Set to e.g. 5.0 if you want soft bound.
+    `perceptron=True` (default): only update on errors.
+    `optimizer='sgd'`: apply delta directly (default).
+    `optimizer='adam'`: per-edge momentum + adaptive learning rate.
+       Same tricks as Adam over backprop, but applied to substrate
+       Hebbian/perceptron deltas (no gradients involved).
     """
     if rng is None:
         rng = np.random.default_rng()
     n = len(X)
     order = rng.permutation(n) if shuffle else np.arange(n)
     n_correct = 0
+
+    # Lazy-allocate Adam state
+    if optimizer == 'adam':
+        if view.m is None:
+            view.m = np.zeros_like(view.W)
+        if view.v is None:
+            view.v = np.zeros_like(view.W)
 
     for start in range(0, n, batch_size):
         idx = order[start:start + batch_size]
@@ -179,6 +204,8 @@ def fast_train_epoch(view: DenseView,
         has_signal = scores.sum(axis=1) > 0
         n_correct += int(((preds == batch_y) & has_signal).sum())
 
+        # Accumulate per-batch delta (then apply via optimizer)
+        delta = np.zeros_like(view.W)
         for b in range(len(idx)):
             label = int(batch_y[b])
             pred = int(preds[b])
@@ -186,16 +213,25 @@ def fast_train_epoch(view: DenseView,
             if not active_rows.any():
                 continue
             if perceptron:
-                # Only update on errors: classical perceptron rule
                 if pred != label:
-                    view.W[active_rows, label] += eta
+                    delta[active_rows, label] += 1.0
                     if has_signal[b]:
-                        view.W[active_rows, pred] -= eta
+                        delta[active_rows, pred] -= 1.0
             else:
-                # Always-update Hebbian
-                view.W[active_rows, label] += eta
+                delta[active_rows, label] += 1.0
                 if has_signal[b] and pred != label:
-                    view.W[active_rows, pred] -= eta * 0.5
+                    delta[active_rows, pred] -= 0.5
+
+        if optimizer == 'adam':
+            view.t += 1
+            view.m = beta1 * view.m + (1 - beta1) * delta
+            view.v = beta2 * view.v + (1 - beta2) * (delta * delta)
+            # Bias correction
+            m_hat = view.m / (1 - beta1 ** view.t)
+            v_hat = view.v / (1 - beta2 ** view.t)
+            view.W += eta * m_hat / (np.sqrt(v_hat) + eps)
+        else:  # sgd
+            view.W += eta * delta
 
     if cap is not None:
         np.clip(view.W, -cap, cap, out=view.W)
@@ -203,6 +239,50 @@ def fast_train_epoch(view: DenseView,
 
 
 # ─── Fast evaluation ───────────────────────────────────────────────────────
+
+def verify_substrate_learning(brain: Brain, vocab: ImageEncoderVocab,
+                                encoder: ImageEncoder,
+                                view: DenseView,
+                                X: np.ndarray, y: np.ndarray, *,
+                                n_samples: int = 100) -> Dict[str, float]:
+    """Verify the SUBSTRATE itself (via spread()) gives the same
+    predictions as the fast path. Proves learning is captured in the
+    substrate's edges, not just the dense view's W matrix.
+
+    Procedure:
+      1. sync dense W → substrate edges
+      2. run spread()-based predict on N samples
+      3. compare to fast_predict on same samples
+      4. report match rate + spread-based accuracy
+
+    Match rate ≈ 1.0 means substrate's edges encode the same decisions
+    as the dense view — the substrate IS learning.
+    """
+    from .mnist import predict as substrate_predict
+
+    sync_dense_to_brain(brain, view)
+
+    n = min(n_samples, len(X))
+    indicators = batch_encode(X[:n], vocab, encoder, view)
+    fast_preds = fast_predict(view, indicators)
+
+    substrate_preds = []
+    for i in range(n):
+        p = substrate_predict(brain, vocab, X[i], encoder=encoder)
+        substrate_preds.append(p if p is not None else -1)
+    substrate_preds = np.array(substrate_preds)
+
+    matches = int((fast_preds == substrate_preds).sum())
+    fast_correct = int(((fast_preds == y[:n]) & (fast_preds >= 0)).sum())
+    sub_correct = int(((substrate_preds == y[:n]) & (substrate_preds >= 0)).sum())
+
+    return {
+        'n_samples': n,
+        'fast_predict_matches_substrate': matches / n,
+        'fast_accuracy': fast_correct / n,
+        'substrate_accuracy': sub_correct / n,
+    }
+
 
 def fast_evaluate(view: DenseView,
                    X: np.ndarray, y: np.ndarray, *,
