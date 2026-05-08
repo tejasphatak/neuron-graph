@@ -16,8 +16,11 @@ import time
 
 import numpy as np
 
-from brain.tasks.mnist.mnist import (
-    build_mnist_brain, train_epoch, evaluate, predict,
+from brain.tasks.mnist.mnist import build_mnist_brain
+from brain.tasks.mnist.encoder import ImageEncoder
+from brain.tasks.mnist.fast import (
+    build_dense_view, sync_dense_to_brain,
+    fast_train_epoch, fast_evaluate,
 )
 
 
@@ -55,49 +58,53 @@ def main():
     eta = float(os.environ.get('ETA', '0.05'))
     grid = int(os.environ.get('GRID', '16'))
     levels = int(os.environ.get('LEVELS', '4'))
+    batch_size = int(os.environ.get('BATCH', '64'))
 
-    from brain.tasks.mnist.encoder import ImageEncoder
     encoder = ImageEncoder(grid_size=grid, n_levels=levels)
 
     data = load_mnist(train_n=train_n, test_n=test_n)
 
     brain, vocab, encoder = build_mnist_brain(encoder=encoder)
+    view = build_dense_view(brain, vocab, encoder)
     print(f'Encoder: {encoder.grid_size}×{encoder.grid_size} grid × '
           f'{encoder.n_levels} levels = {encoder.n_input_neurons()} input neurons')
-    print(f'Brain: {brain.size} neurons total, '
-          f'{getattr(brain, "_used_synapses", 0)} synapses (none yet — RL grows them)')
+    print(f'Brain: {brain.size} neurons, dense view {view.W.shape}')
 
-    # Cold-start eval
-    cold = evaluate(brain, vocab, data['X_test'], data['y_test'],
-                     encoder=encoder)
+    # Cold-start
+    cold = fast_evaluate(view, data['X_test'], data['y_test'],
+                          vocab=vocab, encoder=encoder)
     print(f'\nCold-start test accuracy: {cold["accuracy"]:.1%} '
           f'({cold["n_correct"]}/{cold["n_total"]}, {cold["n_blank"]} blank)')
 
     # Train
-    print(f'\n=== Training ({epochs} epochs, eta={eta}) ===')
+    print(f'\n=== Training ({epochs} epochs, eta={eta}, batch={batch_size}) ===')
     rng = np.random.default_rng(0)
     best_test_acc = 0.0
     for ep in range(epochs):
         t0 = time.time()
-        train_acc = train_epoch(brain, vocab,
-                                  data['X_train'], data['y_train'],
-                                  encoder=encoder, eta=eta,
-                                  rng=rng)
+        train_acc = fast_train_epoch(view,
+                                       data['X_train'], data['y_train'],
+                                       vocab=vocab, encoder=encoder,
+                                       eta=eta, batch_size=batch_size,
+                                       rng=rng)
         elapsed = time.time() - t0
-        test_eval = evaluate(brain, vocab,
-                              data['X_test'], data['y_test'],
-                              encoder=encoder)
+        test_eval = fast_evaluate(view, data['X_test'], data['y_test'],
+                                    vocab=vocab, encoder=encoder)
         if test_eval['accuracy'] > best_test_acc:
             best_test_acc = test_eval['accuracy']
         print(f'  ep {ep+1}/{epochs}  train_acc={train_acc:.1%}  '
               f'test_acc={test_eval["accuracy"]:.1%}  '
               f'(best {best_test_acc:.1%})  '
-              f'edges={getattr(brain, "_used_synapses", 0)}  '
               f'time={elapsed:.1f}s')
 
+    # Sync dense view back to substrate edges (so spread()-based queries see them)
+    sync_dense_to_brain(brain, view)
+    print(f'\nSynced dense view → substrate. '
+          f'Edges in substrate: {getattr(brain, "_used_synapses", 0)}')
+
     # Final evaluation
-    final = evaluate(brain, vocab, data['X_test'], data['y_test'],
-                      encoder=encoder)
+    final = fast_evaluate(view, data['X_test'], data['y_test'],
+                            vocab=vocab, encoder=encoder)
     print(f'\n=== Final ===')
     print(f'  Test accuracy: {final["accuracy"]:.1%} '
           f'({final["n_correct"]}/{final["n_total"]})')
