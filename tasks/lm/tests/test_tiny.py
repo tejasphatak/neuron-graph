@@ -241,3 +241,76 @@ class TestMultiSentence:
 
         assert fox in targets, "'brown' should co_occur with 'fox' from S1"
         assert cat not in targets, "'brown' should NOT co_occur with 'cat' (S2)"
+
+
+# ─── Cross-sentence recombination — honest substrate probe ───────────────
+
+class TestCrossSentenceRecombination:
+    """Prompts mix tokens from different trained sentences. No trained
+    sentence matches these prompts exactly — the substrate must compose.
+
+    Hard assertion: every emitted token has the correct POS for its slot
+    (grammatical validity). Which trained sentence's lexical path the
+    substrate prefers is OBSERVED, not asserted — it depends on the
+    weighted sum of co_occurs evidence from prompt tokens, which is the
+    substrate's natural disambiguation."""
+
+    @staticmethod
+    def _trained_brain():
+        brain, vocab = build_lm_brain()
+        for s in CORPUS:
+            teach_sentence(brain, vocab, s, SHARED_POS)
+        return brain, vocab
+
+    @staticmethod
+    def _token_pos(brain, vocab, token: str):
+        rel_is_a = brain.relation_id['is_a']
+        for syn in brain.synapses_of(vocab.token_to_id[token]):
+            if int(syn['relation']) == rel_is_a:
+                tid = int(syn['to_id'])
+                if tid in vocab.id_to_pos:
+                    return vocab.id_to_pos[tid]
+        return None
+
+    @pytest.mark.parametrize('prompt', [
+        ['the', 'quick', 'small'],   # S1 the+quick + S2 small
+        ['a', 'bold', 'red'],        # S2 a + S3 bold+red
+        ['the', 'smart', 'brown'],   # S1 the+brown + S2 smart
+        ['the', 'small', 'red'],     # S1 the + S2 small + S3 red
+    ])
+    def test_recombined_prompt_emits_grammatical_completion(self, prompt):
+        brain, vocab = self._trained_brain()
+        out = generate_via_spread(brain, vocab, prompt, max_new=6)
+
+        # Assert: substrate produced 6 tokens (didn't bail mid-sentence)
+        assert len(out) == 6, (
+            f'short completion for {prompt!r}: got {out!r}'
+        )
+
+        # Assert: each emission has the correct POS for its slot
+        prompt_len = len(prompt)
+        for i, tok in enumerate(out):
+            slot_idx = prompt_len + i
+            expected = SHARED_POS[slot_idx]
+            actual = self._token_pos(brain, vocab, tok)
+            assert actual == expected, (
+                f'slot {slot_idx}: emitted {tok!r} (POS {actual}), '
+                f'expected POS {expected}. prompt={prompt!r} out={out!r}'
+            )
+
+    def test_observe_recombination_paths(self, capsys):
+        """Pure observation — print what the substrate generates for
+        each recombined prompt. No assertions on content; this exists
+        to document substrate behavior under mixed-evidence prompts."""
+        brain, vocab = self._trained_brain()
+        prompts = [
+            ['the', 'quick', 'small'],
+            ['a', 'bold', 'red'],
+            ['the', 'smart', 'brown'],
+            ['the', 'small', 'red'],
+        ]
+        with capsys.disabled():
+            print()
+            for p in prompts:
+                out = generate_via_spread(brain, vocab, p, max_new=6)
+                print(f'  {" ".join(p):24} → {" ".join(out)}')
