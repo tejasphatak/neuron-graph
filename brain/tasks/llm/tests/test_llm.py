@@ -386,6 +386,56 @@ class TestSubstrateSpread:
         # Same mixing → same result (within tiny floating-point drift)
         assert abs(ppl_combined - ppl_unigram) / ppl_unigram < 0.01
 
+# ─── kNN-LM (PPL #F) ───────────────────────────────────────────────────────
+
+class TestKNNLM:
+    """Substrate as embedding model + kNN over training pairs.
+    Khandelwal et al. 2020 style: nearest-neighbor language modeling."""
+
+    @staticmethod
+    def _setup():
+        tok = WordTokenizer(max_vocab=100, min_freq=1)
+        tok.fit(CORPUS)
+        view = build_llm_view(tok)
+        seqs = [tok.encode(t) for t in CORPUS]
+        rng = np.random.default_rng(0)
+        for _ in range(5):
+            train_ngram_epoch(view, seqs, context_window=4, eta=0.05, rng=rng)
+        return tok, view, seqs
+
+    def test_build_datastore_shape(self):
+        from brain.tasks.llm import build_knn_datastore
+        tok, view, seqs = self._setup()
+        X, y = build_knn_datastore(view, seqs, n_samples=200,
+                                      context_window=4)
+        assert X.ndim == 2
+        assert X.shape[1] == view.W.shape[0]  # V
+        assert y.ndim == 1
+        assert len(X) == len(y)
+
+    def test_datastore_vectors_are_unit_normalized(self):
+        from brain.tasks.llm import build_knn_datastore
+        tok, view, seqs = self._setup()
+        X, _ = build_knn_datastore(view, seqs, n_samples=100,
+                                      context_window=4)
+        norms = np.linalg.norm(X, axis=1)
+        # All non-empty vectors should be ≈ unit norm
+        assert np.allclose(norms[norms > 0], 1.0, atol=1e-3)
+
+    def test_perplexity_with_knn_returns_finite(self):
+        from brain.tasks.llm import (
+            build_knn_datastore, perplexity_with_knn,
+        )
+        tok, view, seqs = self._setup()
+        X, y = build_knn_datastore(view, seqs, n_samples=200)
+        uni = compute_unigram_log_probs(view, seqs)
+        ppl = perplexity_with_knn(view, seqs[:5], X, y, uni,
+                                     k_neighbors=10, alpha_knn=0.3,
+                                     context_window=4)
+        assert isinstance(ppl, float)
+        assert math.isfinite(ppl) and ppl > 0
+
+
     def test_spread_predict_uses_actual_substrate(self):
         """Verifies the spread()-based predict touches the substrate's
         Brain object (not the dense W matrix), via reading synapses_of."""

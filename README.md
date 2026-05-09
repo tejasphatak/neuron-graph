@@ -32,6 +32,7 @@ Baseline matmul                            1684       —
 #B substrate spread (top_k=20)             1171       30%
 #A pure unigram (α=0)                       282       83%
 #A + #C (negsample K=3, σ=0.1)              153       91%
+#A + #C + #F kNN-LM (K=50, α=0.3)           122       93%   ← BEST
 ```
 
 ### Scaling behavior (PPL grows with V, but relative PPL drops)

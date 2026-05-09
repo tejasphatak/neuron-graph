@@ -28,6 +28,7 @@ from .jit import (
 from .substrate_predict import (
     view_to_brain, perplexity_with_spread, perplexity_with_spread_and_backoff,
 )
+from .knn_lm import build_knn_datastore, perplexity_with_knn
 
 __all__ = [
     'WordTokenizer',
@@ -40,4 +41,5 @@ __all__ = [
     'compute_unigram_log_probs', 'perplexity_with_backoff',
     'view_to_brain', 'perplexity_with_spread',
     'perplexity_with_spread_and_backoff',
+    'build_knn_datastore', 'perplexity_with_knn',
 ]
