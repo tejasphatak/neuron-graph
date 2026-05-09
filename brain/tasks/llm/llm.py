@@ -514,14 +514,22 @@ def generate_text(view: LLMView, tokenizer: WordTokenizer,
                     max_new: int = 20,
                     temperature: float = 0.0,
                     top_k: int = 0,
+                    top_p: float = 0.0,
                     context_window: int = 4,
                     decay: float = 0.6,
+                    repetition_penalty: float = 1.0,
+                    no_repeat_ngram: int = 0,
                     rng: Optional[np.random.Generator] = None) -> str:
-    """Generate text autoregressively.
+    """Generate text autoregressively (PPL #4 — better generation).
 
-    temperature=0.0 → greedy argmax.
-    temperature>0 → softmax sampling at given temperature.
-    top_k>0 → restrict sampling to top-K candidates.
+    Args:
+      temperature: 0.0 = greedy argmax; >0 = softmax sampling.
+      top_k: restrict sampling to top-K candidates (0 = no filter).
+      top_p: nucleus sampling — keep smallest set whose probs sum to p.
+      repetition_penalty: divide score for tokens already in output
+        (>1.0 penalizes; HuggingFace-style). 1.0 = no penalty.
+      no_repeat_ngram: block tokens that would form an n-gram already
+        in output (0 = no blocking; 2 = block 2-gram repeats; etc.)
     """
     if rng is None:
         rng = np.random.default_rng()
@@ -529,9 +537,9 @@ def generate_text(view: LLMView, tokenizer: WordTokenizer,
     prompt_ids = tokenizer.encode(prompt, add_bos=True, add_eos=False)
     out_ids: List[int] = list(prompt_ids)
     eos_id = tokenizer.token_to_id[tokenizer.EOS]
+    V = view.W.shape[1]
 
     for _ in range(max_new):
-        # Context: last context_window tokens
         ctx_rows: List[int] = []
         ctx_weights: List[float] = []
         for back in range(context_window):
@@ -546,24 +554,58 @@ def generate_text(view: LLMView, tokenizer: WordTokenizer,
         if not ctx_rows:
             break
 
-        scores = np.zeros(view.W.shape[1], dtype=np.float32)
+        scores = np.zeros(V, dtype=np.float32)
         for r, w in zip(ctx_rows, ctx_weights):
             scores += w * view.W[r]
         if scores.max() <= 0:
             break
 
+        # Repetition penalty: divide score for already-emitted tokens.
+        # If score>0, /penalty reduces; if score<0, *penalty makes it
+        # worse (more negative). Mirrors HF's transformers convention.
+        if repetition_penalty != 1.0:
+            for tok in set(out_ids):
+                row = view.tok_to_row.get(tok)
+                if row is not None:
+                    if scores[row] > 0:
+                        scores[row] /= repetition_penalty
+                    else:
+                        scores[row] *= repetition_penalty
+
+        # n-gram blocking: forbid tokens that would form a repeated
+        # n-gram (same suffix already seen earlier in output).
+        if no_repeat_ngram >= 2 and len(out_ids) >= no_repeat_ngram - 1:
+            ngram_prefix = tuple(out_ids[-(no_repeat_ngram - 1):])
+            forbidden_rows = set()
+            for i in range(len(out_ids) - no_repeat_ngram + 1):
+                if tuple(out_ids[i:i + no_repeat_ngram - 1]) == ngram_prefix:
+                    nxt_tok = out_ids[i + no_repeat_ngram - 1]
+                    nxt_row = view.tok_to_row.get(nxt_tok)
+                    if nxt_row is not None:
+                        forbidden_rows.add(nxt_row)
+            for r in forbidden_rows:
+                scores[r] = -np.inf
+
         if temperature <= 0:
             next_row = int(scores.argmax())
         else:
-            # Optional top-k filter
             if top_k > 0:
                 top_idx = np.argpartition(scores, -top_k)[-top_k:]
                 mask = np.full_like(scores, -np.inf)
                 mask[top_idx] = scores[top_idx]
                 scores = mask
-            # Softmax
             exp = np.exp((scores - scores.max()) / max(1e-6, temperature))
             probs = exp / exp.sum()
+            # top-p (nucleus): smallest set summing to >= top_p
+            if top_p > 0.0:
+                sorted_idx = np.argsort(-probs)
+                cumsum = np.cumsum(probs[sorted_idx])
+                cutoff = np.searchsorted(cumsum, top_p) + 1
+                keep = sorted_idx[:cutoff]
+                mask = np.zeros_like(probs)
+                mask[keep] = probs[keep]
+                if mask.sum() > 0:
+                    probs = mask / mask.sum()
             next_row = int(rng.choice(len(probs), p=probs))
 
         next_tok = view.row_to_tok[next_row]
