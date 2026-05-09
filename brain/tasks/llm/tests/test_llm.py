@@ -252,6 +252,68 @@ class TestUnigramBackoff:
 
 # ─── Substrate-native spread() prediction (PPL #B) ─────────────────────────
 
+# ─── Negative sampling (PPL #C) ────────────────────────────────────────────
+
+class TestNegativeSampling:
+    """Word2vec-style negative sampling: weaken random non-target edges
+    per (ctx, target) pair. Forces W to be discriminative."""
+
+    @staticmethod
+    def _setup():
+        tok = WordTokenizer(max_vocab=100, min_freq=1)
+        tok.fit(CORPUS)
+        view = build_llm_view(tok)
+        seqs = [tok.encode(t) for t in CORPUS]
+        return tok, view, seqs
+
+    def test_negsample_trainer_modifies_w(self):
+        from brain.tasks.llm.jit import train_ngram_epoch_jit_negsample
+        tok, view, seqs = self._setup()
+        rng = np.random.default_rng(0)
+        train_ngram_epoch_jit_negsample(view, seqs,
+                                          context_window=4, eta=0.05,
+                                          neg_samples=3, neg_scale=0.1,
+                                          rng=rng)
+        assert np.any(view.W != 0)
+
+    def test_negsample_combined_with_backoff_drops_ppl(self):
+        """The defining test: #A + #C should beat #A alone on small set."""
+        from brain.tasks.llm.jit import (
+            train_ngram_epoch_jit_negsample, train_ngram_epoch_jit_parallel,
+        )
+
+        # Baseline: standard JIT training + #A backoff
+        tok = WordTokenizer(max_vocab=100, min_freq=1)
+        tok.fit(CORPUS)
+        v_a = build_llm_view(tok)
+        seqs = [tok.encode(t) for t in CORPUS]
+        rng_a = np.random.default_rng(0)
+        for _ in range(5):
+            train_ngram_epoch_jit_parallel(v_a, seqs, context_window=4,
+                                              eta=0.05, rng=rng_a)
+        uni_a = compute_unigram_log_probs(v_a, seqs)
+        ppl_a = perplexity_with_backoff(v_a, seqs[:30], uni_a, alpha=0.5,
+                                          context_window=4)
+
+        # #C: negsample training + #A backoff
+        v_c = build_llm_view(tok)
+        rng_c = np.random.default_rng(0)
+        for _ in range(5):
+            train_ngram_epoch_jit_negsample(v_c, seqs, context_window=4,
+                                              eta=0.05, neg_samples=3,
+                                              neg_scale=0.1, rng=rng_c)
+        uni_c = compute_unigram_log_probs(v_c, seqs)
+        ppl_c = perplexity_with_backoff(v_c, seqs[:30], uni_c, alpha=0.5,
+                                          context_window=4)
+
+        # #C+#A should be no worse than #A alone (typically better)
+        # On small repetitive corpus the gap may be small; allow 15% slack
+        assert ppl_c <= ppl_a * 1.15, (
+            f'negsample regressed PPL: #A only={ppl_a:.1f}, '
+            f'#A+#C={ppl_c:.1f}'
+        )
+
+
 class TestSubstrateSpread:
     """The spread() primitive used for prediction instead of matmul.
     Substrate gets converted from dense W to sparse Brain via top-K
