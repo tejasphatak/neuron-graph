@@ -20,6 +20,7 @@ from .llm import (
     train_bigram_epoch, train_ngram_epoch,
     train_ngram_epoch_batched, train_ngram_epoch_fast,
     generate_text, perplexity,
+    compute_unigram_log_probs, perplexity_with_backoff,
 )
 from .jit import train_ngram_epoch_jit, NUMBA_AVAILABLE
 
@@ -30,4 +31,5 @@ __all__ = [
     'train_ngram_epoch_batched', 'train_ngram_epoch_fast',
     'train_ngram_epoch_jit', 'NUMBA_AVAILABLE',
     'generate_text', 'perplexity',
+    'compute_unigram_log_probs', 'perplexity_with_backoff',
 ]

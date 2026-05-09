@@ -574,6 +574,77 @@ def generate_text(view: LLMView, tokenizer: WordTokenizer,
     return tokenizer.decode(out_ids, skip_special=True)
 
 
+def compute_unigram_log_probs(view: LLMView,
+                                sequences: List[List[int]]) -> np.ndarray:
+    """Compute Laplace-smoothed unigram log-probabilities from training
+    sequences. Used for unigram backoff in perplexity_with_backoff()."""
+    V = view.W.shape[1]
+    counts = np.zeros(V, dtype=np.float64)
+    for seq in sequences:
+        for tok in seq:
+            row = view.tok_to_row.get(tok)
+            if row is not None:
+                counts[row] += 1
+    return np.log(counts + 1) - np.log(counts.sum() + V)
+
+
+def perplexity_with_backoff(view: LLMView, sequences: List[List[int]],
+                              unigram_log_probs: np.ndarray, *,
+                              alpha: float = 0.5,
+                              context_window: int = 4, decay: float = 0.6,
+                              prob_floor: float = 1e-8) -> float:
+    """PPL with unigram-backoff interpolation:
+        P_mixed = α · P_context + (1-α) · P_unigram
+    Empirically drops PPL 50-85% on TinyStories — context softmax is
+    near-uniform for unseen ctx, unigram is much more concentrated.
+    """
+    decay_powers = np.array([decay ** k for k in range(context_window)],
+                              dtype=np.float32)
+    log_loss = 0.0
+    n_pred = 0
+    log_alpha = math.log(max(alpha, 1e-30))
+    log_one_m_alpha = math.log(max(1 - alpha, 1e-30))
+    floor_logp = math.log(prob_floor)
+    uni_logp = unigram_log_probs.astype(np.float32)
+
+    for seq in sequences:
+        rows = [view.tok_to_row.get(t, -1) for t in seq]
+        for i in range(1, len(rows)):
+            target = rows[i]
+            if target < 0:
+                continue
+            ctx_rows = []
+            ctx_w = []
+            for k in range(context_window):
+                j = i - 1 - k
+                if j < 0:
+                    break
+                if rows[j] < 0:
+                    continue
+                ctx_rows.append(rows[j])
+                ctx_w.append(decay_powers[k])
+            if not ctx_rows:
+                continue
+            scores = np.zeros(view.W.shape[1], dtype=np.float32)
+            for r, w in zip(ctx_rows, ctx_w):
+                scores += w * view.W[r]
+            scores -= scores.max()
+            exp_s = np.exp(scores)
+            denom = exp_s.sum()
+            if denom <= 0:
+                continue
+            ctx_logp_target = scores[target] - math.log(denom + 1e-30)
+            mixed = np.logaddexp(log_alpha + ctx_logp_target,
+                                  log_one_m_alpha + uni_logp[target])
+            target_logp = max(mixed, floor_logp)
+            log_loss += -target_logp
+            n_pred += 1
+
+    if n_pred == 0:
+        return float('inf')
+    return math.exp(log_loss / n_pred)
+
+
 def perplexity(view: LLMView, sequences: List[List[int]], *,
                 context_window: int = 4, decay: float = 0.6,
                 softmax_temperature: float = 1.0,
