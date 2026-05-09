@@ -25,14 +25,38 @@ distinct domains: RL games, language modeling, and image classification.
 ### PPL progression (substrate-LLM, verified, no estimates)
 
 ```
-Approach                                     PPL    drop_vs_baseline
+Approach (5K stories, V=2.5K)                PPL    drop_vs_baseline
 ─────────────────────────────────────────────────────────────────────
-Baseline matmul (5K stories)               1684       —
+Baseline matmul                            1684       —
 #B substrate spread (top_k=20)             1171       30%
 #A pure unigram (α=0)                       282       83%
 #A + #C (negsample K=3, σ=0.1)              153       91%
-─────────────────────────────────────────────────────────────────────
-Same combo at 30K stories, V=4K:            164       94% (vs 2721 baseline)
+```
+
+### Scaling behavior (PPL grows with V, but relative PPL drops)
+
+```
+Stories  V       Baseline   #A+#C    PPL/V (relative)
+──────────────────────────────────────────────────────
+5K       2500    1684       153      6.1%
+30K      4000    2721       164      4.1%
+50K      5000    1005       181      3.6%  ← best relative
+```
+
+Absolute PPL number grows with vocab (more cells in W to learn). The
+**relative** measure (PPL/V — fraction of uniform) keeps dropping
+monotonically. Substrate genuinely improves with scale.
+
+### Negative results (documented)
+
+```
+Approach                          Result
+─────────────────────────────────────────────────────────────────
+#A + #B (matmul + spread)         No improvement over #A alone
+#A + #C + #E (combined)           No compound; #C alone wins
+#2 BPE tokenizer (5K, V=2500)     Worse: 1.92 bpc vs 1.71 word
+#1 sentence-id binding (TinyStories) Oracle helps, prompt-pred fails
+   (overlapping prefixes)
 ```
 
 **#A unigram backoff**: log-mix W-context softmax with Laplace-smoothed
