@@ -10,6 +10,9 @@
  * Build: gcc -O3 -march=native -fPIC -shared -fopenmp \
  *           -o _inner_loop.so _inner_loop.c
  *
+ * OpenMP-parallel: each thread processes its own slab of sequences,
+ * accumulates into a thread-local delta buffer, reduce-sums after.
+ *
  * Removes the venv+numba dependency. Single shared object, ctypes-bound.
  */
 
@@ -17,6 +20,10 @@
 #include <stdlib.h>
 #include <stdint.h>
 #include <string.h>
+
+#ifdef _OPENMP
+#include <omp.h>
+#endif
 
 /* Returns: 0 on success. Updates n_pairs_out and n_correct_out. */
 int inner_loop_negsample(
@@ -118,5 +125,141 @@ int inner_loop_negsample(
     *n_pairs_out = n_pairs;
     *n_correct_out = n_correct;
     free(scores);
+    return 0;
+}
+
+
+/* Parallel version: each thread gets its own delta slab, reduce after.
+ * delta_per_thread is [n_threads * V * V] flattened. */
+int inner_loop_negsample_parallel(
+    float *W,
+    float *delta_per_thread,        /* [n_threads, V, V] */
+    int64_t V,
+    int64_t *seq_rows,
+    int64_t *seq_offsets,
+    int64_t n_seq,
+    float *decay_powers,
+    int ctx_window,
+    int neg_samples,
+    int64_t *neg_targets,
+    float neg_scale,
+    int64_t *pair_counts,           /* [n_threads] per-thread pair count */
+    int64_t *correct_counts,        /* [n_threads] per-thread correct count */
+    int n_threads
+) {
+#ifdef _OPENMP
+    omp_set_num_threads(n_threads);
+#endif
+
+    /* Pre-compute neg_targets offsets per sequence so each thread knows
+     * where to start indexing without races. neg_idx_per_seq[s] = total
+     * pairs before sequence s × neg_samples. */
+    int64_t *seq_pair_count = (int64_t*)calloc(n_seq, sizeof(int64_t));
+    int64_t *neg_idx_per_seq = (int64_t*)calloc(n_seq, sizeof(int64_t));
+    if (!seq_pair_count || !neg_idx_per_seq) {
+        free(seq_pair_count);
+        free(neg_idx_per_seq);
+        return -1;
+    }
+    for (int64_t s = 0; s < n_seq; s++) {
+        int64_t L = seq_offsets[s + 1] - seq_offsets[s];
+        seq_pair_count[s] = (L >= 2) ? L - 1 : 0;
+    }
+    int64_t total_pairs = 0;
+    for (int64_t s = 0; s < n_seq; s++) {
+        neg_idx_per_seq[s] = total_pairs * neg_samples;
+        total_pairs += seq_pair_count[s];
+    }
+
+#pragma omp parallel
+    {
+#ifdef _OPENMP
+        int tid = omp_get_thread_num();
+#else
+        int tid = 0;
+#endif
+        float *delta = delta_per_thread + (int64_t)tid * V * V;
+        float *scores = (float*)malloc(V * sizeof(float));
+        int64_t local_pairs = 0;
+        int64_t local_correct = 0;
+
+#pragma omp for schedule(dynamic, 16)
+        for (int64_t s = 0; s < n_seq; s++) {
+            int64_t start = seq_offsets[s];
+            int64_t end = seq_offsets[s + 1];
+            int64_t L = end - start;
+            if (L < 2) continue;
+            int64_t neg_idx = neg_idx_per_seq[s];
+
+            for (int64_t i = 0; i < L - 1; i++) {
+                int64_t target = seq_rows[start + i + 1];
+                if (target < 0) continue;
+
+                memset(scores, 0, V * sizeof(float));
+                int ctx_count = 0;
+                for (int k = 0; k < ctx_window; k++) {
+                    int64_t j = i - k;
+                    if (j < 0) break;
+                    int64_t ctx = seq_rows[start + j];
+                    if (ctx < 0) continue;
+                    float w = decay_powers[k];
+                    float *Wrow = W + ctx * V;
+                    for (int64_t v = 0; v < V; v++) {
+                        scores[v] += w * Wrow[v];
+                    }
+                    ctx_count++;
+                }
+                if (ctx_count == 0) continue;
+
+                float best_score = scores[0];
+                int64_t pred = 0;
+                for (int64_t v = 1; v < V; v++) {
+                    if (scores[v] > best_score) {
+                        best_score = scores[v];
+                        pred = v;
+                    }
+                }
+                int no_signal = (best_score <= 0.0f);
+
+                if (pred == target && !no_signal) {
+                    local_correct++;
+                } else {
+                    for (int k = 0; k < ctx_window; k++) {
+                        int64_t j = i - k;
+                        if (j < 0) break;
+                        int64_t ctx = seq_rows[start + j];
+                        if (ctx < 0) continue;
+                        float w = decay_powers[k];
+                        delta[ctx * V + target] += w;
+                        if (!no_signal) {
+                            delta[ctx * V + pred] -= w;
+                        }
+                    }
+                }
+
+                for (int ns = 0; ns < neg_samples; ns++) {
+                    int64_t neg_t = neg_targets[neg_idx++];
+                    if (neg_t == target) continue;
+                    for (int k = 0; k < ctx_window; k++) {
+                        int64_t j = i - k;
+                        if (j < 0) break;
+                        int64_t ctx = seq_rows[start + j];
+                        if (ctx < 0) continue;
+                        float w = decay_powers[k];
+                        delta[ctx * V + neg_t] -= w * neg_scale;
+                    }
+                }
+
+                local_pairs++;
+            }
+        }
+
+        pair_counts[tid] = local_pairs;
+        correct_counts[tid] = local_correct;
+        free(scores);
+    }
+
+    free(seq_pair_count);
+    free(neg_idx_per_seq);
     return 0;
 }

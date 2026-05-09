@@ -8,7 +8,7 @@
 #   make clean            # remove the .so
 
 CC      ?= gcc
-CFLAGS  ?= -O3 -march=native -fPIC -shared
+CFLAGS  ?= -O3 -march=native -fPIC -shared -fopenmp
 TARGET  := _inner_loop.so
 SOURCES := _inner_loop.c
 
