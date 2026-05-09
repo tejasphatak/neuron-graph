@@ -113,6 +113,68 @@ def predict_via_spread(brain: Brain, row_to_nid: Dict[int, int],
     return scores
 
 
+def perplexity_with_spread_and_backoff(view: LLMView, brain: Brain,
+                                          row_to_nid: Dict[int, int],
+                                          sequences: List[List[int]],
+                                          unigram_log_probs: np.ndarray, *,
+                                          alpha: float = 0.5,
+                                          context_window: int = 4,
+                                          decay: float = 0.6,
+                                          max_steps: int = 2,
+                                          softmax_temperature: float = 1.0,
+                                          prob_floor: float = 1e-8) -> float:
+    """PPL #A + #B combined: spread()-based context score MIXED with
+    unigram backoff. Best of both: substrate's semantic-neighbor
+    smoothing AND unigram fallback for unseen contexts."""
+    V = view.W.shape[0]
+    decay_powers = [decay ** k for k in range(context_window)]
+    log_loss = 0.0
+    n_pred = 0
+    log_alpha = math.log(max(alpha, 1e-30))
+    log_one_m_alpha = math.log(max(1 - alpha, 1e-30))
+    floor_logp = math.log(prob_floor)
+    uni_logp = unigram_log_probs.astype(np.float32)
+
+    for seq in sequences:
+        rows = [view.tok_to_row.get(t, -1) for t in seq]
+        for i in range(1, len(rows)):
+            target_row = rows[i]
+            if target_row < 0:
+                continue
+            ctx_rows = []
+            ctx_w = []
+            for k in range(context_window):
+                j = i - 1 - k
+                if j < 0:
+                    break
+                if rows[j] < 0:
+                    continue
+                ctx_rows.append(rows[j])
+                ctx_w.append(decay_powers[k])
+            if not ctx_rows:
+                continue
+
+            scores = predict_via_spread(brain, row_to_nid,
+                                          ctx_rows, ctx_w, V,
+                                          max_steps=max_steps)
+            scores = scores / max(1e-6, softmax_temperature)
+            scores -= scores.max()
+            exp_s = np.exp(scores)
+            denom = exp_s.sum()
+            if denom <= 0:
+                continue
+            ctx_logp_target = scores[target_row] - math.log(denom + 1e-30)
+            mixed = np.logaddexp(log_alpha + ctx_logp_target,
+                                  log_one_m_alpha + uni_logp[target_row])
+            target_logp = max(mixed, floor_logp)
+            log_loss += -target_logp
+            n_pred += 1
+
+    if n_pred == 0:
+        return float('inf')
+    return math.exp(log_loss / n_pred)
+
+
 def perplexity_with_spread(view: LLMView, brain: Brain,
                               row_to_nid: Dict[int, int],
                               sequences: List[List[int]], *,

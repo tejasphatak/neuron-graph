@@ -18,6 +18,7 @@ from brain.tasks.llm import (
     generate_text, perplexity,
     compute_unigram_log_probs, perplexity_with_backoff,
     view_to_brain, perplexity_with_spread,
+    perplexity_with_spread_and_backoff,
 )
 
 
@@ -294,6 +295,34 @@ class TestSubstrateSpread:
                                         seqs[:5], context_window=4)
         assert isinstance(ppl, float)
         assert ppl > 0
+
+    def test_perplexity_with_spread_and_backoff_returns_finite(self):
+        """Combined #A + #B function returns valid float."""
+        tok, view, seqs = self._setup()
+        brain, row_to_nid = view_to_brain(view, top_k_per_row=10)
+        uni = compute_unigram_log_probs(view, seqs)
+        ppl = perplexity_with_spread_and_backoff(
+            view, brain, row_to_nid, seqs[:5], uni,
+            alpha=0.5, context_window=4,
+        )
+        assert isinstance(ppl, float)
+        assert math.isfinite(ppl) and ppl > 0
+
+    def test_combined_alpha_zero_equals_pure_unigram(self):
+        """At α=0.0, combined PPL == pure-unigram PPL (spread term has
+        zero mixing weight)."""
+        tok, view, seqs = self._setup()
+        brain, row_to_nid = view_to_brain(view, top_k_per_row=10)
+        uni = compute_unigram_log_probs(view, seqs)
+        ppl_combined = perplexity_with_spread_and_backoff(
+            view, brain, row_to_nid, seqs[:10], uni,
+            alpha=0.0, context_window=4,
+        )
+        ppl_unigram = perplexity_with_backoff(
+            view, seqs[:10], uni, alpha=0.0, context_window=4,
+        )
+        # Same mixing → same result (within tiny floating-point drift)
+        assert abs(ppl_combined - ppl_unigram) / ppl_unigram < 0.01
 
     def test_spread_predict_uses_actual_substrate(self):
         """Verifies the spread()-based predict touches the substrate's
