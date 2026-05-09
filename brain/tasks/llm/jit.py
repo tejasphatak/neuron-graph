@@ -110,6 +110,115 @@ def _inner_loop_jit_parallel(W, delta_per_thread,
 
 
 @njit(cache=True, fastmath=True)
+def _inner_loop_jit_combined(W, delta,
+                                seq_rows, seq_offsets,
+                                decay_powers,
+                                context_window,
+                                wide_window,
+                                wide_scale,
+                                neg_samples,
+                                neg_targets,
+                                neg_scale,
+                                n_pairs_out,
+                                n_correct_out):
+    """JIT inner loop combining #C (negative sampling) + #E (wide
+    co_occurs). Per pair:
+      1. Score over W via context_window
+      2. Perceptron update (positive: target, negative: pred)
+      3. Wide co_occurs: weak (wide_ctx → target) for tokens
+         beyond context_window
+      4. Negative sampling: weak weakening for K random non-targets
+    """
+    V = W.shape[1]
+    n_pairs = 0
+    n_correct = 0
+    n_seq = len(seq_offsets) - 1
+    neg_idx = 0
+
+    for s in range(n_seq):
+        start = seq_offsets[s]
+        end = seq_offsets[s + 1]
+        L = end - start
+        if L < 2:
+            continue
+        for i in range(L - 1):
+            target = seq_rows[start + i + 1]
+            if target < 0:
+                continue
+
+            scores = np.zeros(V, dtype=np.float32)
+            ctx_count = 0
+            for k in range(context_window):
+                j = i - k
+                if j < 0:
+                    break
+                ctx = seq_rows[start + j]
+                if ctx < 0:
+                    continue
+                w = decay_powers[k]
+                for v in range(V):
+                    scores[v] += w * W[ctx, v]
+                ctx_count += 1
+            if ctx_count == 0:
+                continue
+
+            best_score = scores[0]
+            pred = 0
+            for v in range(1, V):
+                if scores[v] > best_score:
+                    best_score = scores[v]
+                    pred = v
+            no_signal = best_score <= 0.0
+
+            if pred == target and not no_signal:
+                n_correct += 1
+            else:
+                # Standard perceptron update
+                for k in range(context_window):
+                    j = i - k
+                    if j < 0:
+                        break
+                    ctx = seq_rows[start + j]
+                    if ctx < 0:
+                        continue
+                    w = decay_powers[k]
+                    delta[ctx, target] += w
+                    if not no_signal:
+                        delta[ctx, pred] -= w
+
+                # Wide co_occurs
+                for k in range(context_window, wide_window):
+                    j = i - k
+                    if j < 0:
+                        break
+                    ctx = seq_rows[start + j]
+                    if ctx < 0:
+                        continue
+                    delta[ctx, target] += wide_scale
+
+            # Negative sampling
+            for ns in range(neg_samples):
+                neg_t = neg_targets[neg_idx]
+                neg_idx += 1
+                if neg_t == target:
+                    continue
+                for k in range(context_window):
+                    j = i - k
+                    if j < 0:
+                        break
+                    ctx = seq_rows[start + j]
+                    if ctx < 0:
+                        continue
+                    w = decay_powers[k]
+                    delta[ctx, neg_t] -= w * neg_scale
+
+            n_pairs += 1
+
+    n_pairs_out[0] = n_pairs
+    n_correct_out[0] = n_correct
+
+
+@njit(cache=True, fastmath=True)
 def _inner_loop_jit_wide_cooccurs(W, delta,
                                      seq_rows, seq_offsets,
                                      decay_powers,
@@ -473,6 +582,71 @@ def train_ngram_epoch_jit_parallel(view, sequences: List[List[int]], *,
         'n_correct': n_correct,
         'next_token_accuracy': n_correct / max(1, n_pairs),
         'n_threads': n_threads,
+    }
+
+
+def train_ngram_epoch_jit_combined(view, sequences: List[List[int]], *,
+                                      context_window: int = 4,
+                                      wide_window: int = 8,
+                                      wide_scale: float = 0.05,
+                                      neg_samples: int = 3,
+                                      neg_scale: float = 0.1,
+                                      eta: float = 0.05,
+                                      decay: float = 0.6,
+                                      shuffle: bool = True,
+                                      rng: Optional[np.random.Generator] = None,
+                                      weight_clip: Optional[float] = 5.0) -> dict:
+    """#C + #E combined: negative sampling + wide co_occurs."""
+    if not NUMBA_AVAILABLE:
+        return train_ngram_epoch_jit(view, sequences,
+                                       context_window=context_window,
+                                       eta=eta, decay=decay,
+                                       shuffle=shuffle, rng=rng,
+                                       weight_clip=weight_clip)
+    if rng is None:
+        rng = np.random.default_rng()
+
+    encoded = []
+    for seq in sequences:
+        rows = np.array([view.tok_to_row.get(t, -1) for t in seq], dtype=np.int64)
+        encoded.append(rows)
+    if shuffle:
+        rng.shuffle(encoded)
+
+    flat = np.concatenate(encoded) if encoded else np.zeros(0, dtype=np.int64)
+    offsets = np.zeros(len(encoded) + 1, dtype=np.int64)
+    cur = 0
+    for i, e in enumerate(encoded):
+        offsets[i] = cur
+        cur += len(e)
+    offsets[-1] = cur
+
+    decay_powers = np.array([decay ** k for k in range(context_window)],
+                              dtype=np.float32)
+    V = view.W.shape[1]
+    n_total_pairs = sum(max(0, len(e) - 1) for e in encoded)
+    neg_targets = rng.integers(0, V, size=n_total_pairs * neg_samples,
+                                  dtype=np.int64)
+
+    delta = np.zeros_like(view.W)
+    n_pairs_out = np.zeros(1, dtype=np.int64)
+    n_correct_out = np.zeros(1, dtype=np.int64)
+
+    _inner_loop_jit_combined(view.W, delta, flat, offsets,
+                                decay_powers, context_window,
+                                wide_window, np.float32(wide_scale),
+                                neg_samples, neg_targets,
+                                np.float32(neg_scale),
+                                n_pairs_out, n_correct_out)
+
+    view.W += eta * delta
+    if weight_clip is not None:
+        np.clip(view.W, -weight_clip, weight_clip, out=view.W)
+
+    return {
+        'n_pairs': int(n_pairs_out[0]),
+        'n_correct': int(n_correct_out[0]),
+        'next_token_accuracy': int(n_correct_out[0]) / max(1, int(n_pairs_out[0])),
     }
 
 
