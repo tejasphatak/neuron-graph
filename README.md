@@ -51,22 +51,27 @@ sampling + #F kNN-LM) hits PPL 104 — into bigram-baseline territory
 Substrate is now competitive with classical n-gram LMs on this corpus,
 running on CPU with no backprop and no GPU.**
 
-### Cross-corpus transfer (Wikipedia, 5K factual sentences)
+### Cross-corpus transfer (Wikipedia factual prose)
 
 ```
-Corpus shape         V       Train tok    PPL    PPL/V    Cloze top-1   vs random
-─────────────────────────────────────────────────────────────────────────────────
-TinyStories 5K       2500    ~440K        153    6.1%      —             —
-simple-Wikipedia 5K  4000    322K         281    7.0%     4.67%         187× random
+Corpus shape          V       Train tok    PPL    PPL/V    Cloze top-1   vs random
+──────────────────────────────────────────────────────────────────────────────────
+TinyStories 5K        2500    ~440K        153    6.1%       —            —
+simple-Wikipedia 5K   4000    322K         281    7.0%      4.67%        187× random
+simple-Wikipedia 30K  4000    1,939K       227    5.7%      3.00%        120× random
 ```
 
-Substrate **transfers** to factual prose — cloze 4.67% is 187× random
-baseline, so the architecture learned real word-position structure on
-Wikipedia. Generations are still incoherent at this scale because
-Wikipedia's named-entity sparsity (each sentence introduces unique
-proper nouns) starves bigram coverage. **Documented limit:** factual
-corpora need either more data (≥30K sentences) or BPE for OOV — same
-substrate, scale-dependent.
+**Different ceiling on factual prose, not architecture-bound.**
+6× more Wikipedia data drops PPL/V only 7.0% → 5.7% (TinyStories same
+move drops 4.9% → 1.9%). Cloze top-1 *dropped* 4.67% → 3.00% despite
+more data — wider vocabulary diversity offsets gains because each
+sentence introduces unique proper nouns + jargon. Generations at 30K
+get the syntactic skeleton ("april is 10 may still have the names...")
+but semantic content stays scattered.
+
+**Falsified:** "data alone fixes Wikipedia." Factual corpora hit a
+sparser n-gram coverage problem narrative doesn't have. Path forward
+is BPE for OOV + concept-level grouping, not just more rows.
 
 Absolute PPL number grows with vocab (more cells in W to learn). The
 **relative** measure (PPL/V — fraction of uniform) keeps dropping
