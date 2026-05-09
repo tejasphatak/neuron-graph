@@ -41,8 +41,8 @@ Baseline matmul                            1684       —
 Stories  V       Baseline   #A+#C    +#F kNN    PPL/V (relative)
 ─────────────────────────────────────────────────────────────────
 5K       2500    1684       153      122        4.9%
-30K      4000    2721       170      104        2.6%   ← BEST
-50K      5000    1005       181      —          3.6%
+30K      4000    2721       170      104        2.6%
+100K     6000     —         204      117        1.9%   ← BEST RELATIVE
 ```
 
 **At 30K stories, the full architecture (#A unigram backoff + #C neg
