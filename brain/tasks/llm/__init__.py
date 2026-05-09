@@ -29,6 +29,9 @@ from .substrate_predict import (
     view_to_brain, perplexity_with_spread, perplexity_with_spread_and_backoff,
 )
 from .knn_lm import build_knn_datastore, perplexity_with_knn
+from .eval_tasks import (
+    cloze_benchmark, sentence_completion_eval, random_baseline_cloze,
+)
 
 __all__ = [
     'WordTokenizer',
@@ -42,4 +45,5 @@ __all__ = [
     'view_to_brain', 'perplexity_with_spread',
     'perplexity_with_spread_and_backoff',
     'build_knn_datastore', 'perplexity_with_knn',
+    'cloze_benchmark', 'sentence_completion_eval', 'random_baseline_cloze',
 ]
