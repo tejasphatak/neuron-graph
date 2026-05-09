@@ -5,8 +5,9 @@ No backprop. No GPU.
 
 Each neuron is a 64-byte cache-line struct in a numpy array. Edges are CSR-laid-out
 synapses. Spreading activation + Hebbian + reward-modulated plasticity drives learning.
-The graph **self-organizes from reward** — same primitives proven across three
-distinct domains: RL games, language modeling, and image classification.
+The graph **self-organizes from reward** — same primitives proven across **six
+distinct domains**: RL games, sentence-retrieval LM, image classification, audio,
+video, and open-vocabulary text generation.
 
 ## Headline results
 
