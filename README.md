@@ -55,6 +55,19 @@ Absolute PPL number grows with vocab (more cells in W to learn). The
 **relative** measure (PPL/V — fraction of uniform) keeps dropping
 monotonically. Substrate genuinely improves with scale.
 
+### Quick demo
+
+```bash
+git clone https://github.com/tejasphatak/neuron-graph.git
+cd neuron-graph
+
+# 500 stories × 5 epochs, ~10 seconds end-to-end
+PYTHONPATH=. python3 examples/tinystories_demo.py
+```
+
+Trains the substrate-LLM, prints PPL, runs cloze benchmark, generates
+samples. All on CPU. No GPU. No backprop.
+
 ### Negative results (documented)
 
 ```
