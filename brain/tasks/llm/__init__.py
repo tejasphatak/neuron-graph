@@ -23,6 +23,7 @@ from .llm import (
     compute_unigram_log_probs, perplexity_with_backoff,
 )
 from .jit import train_ngram_epoch_jit, NUMBA_AVAILABLE
+from .substrate_predict import view_to_brain, perplexity_with_spread
 
 __all__ = [
     'WordTokenizer',
@@ -32,4 +33,5 @@ __all__ = [
     'train_ngram_epoch_jit', 'NUMBA_AVAILABLE',
     'generate_text', 'perplexity',
     'compute_unigram_log_probs', 'perplexity_with_backoff',
+    'view_to_brain', 'perplexity_with_spread',
 ]
