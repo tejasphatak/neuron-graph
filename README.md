@@ -51,6 +51,23 @@ sampling + #F kNN-LM) hits PPL 104 — into bigram-baseline territory
 Substrate is now competitive with classical n-gram LMs on this corpus,
 running on CPU with no backprop and no GPU.**
 
+### Cross-corpus transfer (Wikipedia, 5K factual sentences)
+
+```
+Corpus shape         V       Train tok    PPL    PPL/V    Cloze top-1   vs random
+─────────────────────────────────────────────────────────────────────────────────
+TinyStories 5K       2500    ~440K        153    6.1%      —             —
+simple-Wikipedia 5K  4000    322K         281    7.0%     4.67%         187× random
+```
+
+Substrate **transfers** to factual prose — cloze 4.67% is 187× random
+baseline, so the architecture learned real word-position structure on
+Wikipedia. Generations are still incoherent at this scale because
+Wikipedia's named-entity sparsity (each sentence introduces unique
+proper nouns) starves bigram coverage. **Documented limit:** factual
+corpora need either more data (≥30K sentences) or BPE for OOV — same
+substrate, scale-dependent.
+
 Absolute PPL number grows with vocab (more cells in W to learn). The
 **relative** measure (PPL/V — fraction of uniform) keeps dropping
 monotonically. Substrate genuinely improves with scale.
@@ -78,6 +95,8 @@ Approach                          Result
 #2 BPE tokenizer (5K, V=2500)     Worse: 1.92 bpc vs 1.71 word
 #1 sentence-id binding (TinyStories) Oracle helps, prompt-pred fails
    (overlapping prefixes)
+#5 Wikipedia 5K transfer            Partial: 187× random cloze, but
+   generations incoherent — needs scale or BPE for named entities
 ```
 
 **#A unigram backoff**: log-mix W-context softmax with Laplace-smoothed
