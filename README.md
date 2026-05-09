@@ -70,8 +70,17 @@ get the syntactic skeleton ("april is 10 may still have the names...")
 but semantic content stays scattered.
 
 **Falsified:** "data alone fixes Wikipedia." Factual corpora hit a
-sparser n-gram coverage problem narrative doesn't have. Path forward
-is BPE for OOV + concept-level grouping, not just more rows.
+sparser n-gram coverage problem narrative doesn't have.
+
+**Also falsified: "BPE for OOV fixes Wikipedia."** Tested directly
+(V=4000 BPE, same 30K corpus). BPE makes generation *worse* — cloze
+top-1 rises (5.33% vs 3.00%, easier to predict short subwords) but
+PPL/V doubles (10.3% vs 5.7%) and generations decay to subword soup
+(`"april is bas il ica af f fed..."`). 4-token BPE context carries far
+less semantic content than 4 words. **Substrate is architecture-bound
+on factual prose at this scale**, not data- or tokenization-bound.
+Path forward = concept-level grouping (cell-assembly substrate), not
+BPE.
 
 Absolute PPL number grows with vocab (more cells in W to learn). The
 **relative** measure (PPL/V — fraction of uniform) keeps dropping
