@@ -29,9 +29,10 @@ class NeuronType:
     RULE = 4          # condition→action neuron
     CONCEPT = 5       # abstract concept with no sensory content
     ASSEMBLY = 6      # named cell-assembly summary
+    ASTROCYTE = 7     # process node: couples its neighbor synapses (assoc. memory)
 
     NAMES = {0: 'text', 1: 'image', 2: 'audio', 3: 'episode',
-             4: 'rule', 5: 'concept', 6: 'assembly'}
+             4: 'rule', 5: 'concept', 6: 'assembly', 7: 'astrocyte'}
 
 
 class Modality:

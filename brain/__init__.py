@@ -32,6 +32,7 @@ from .working_memory import WorkingMemory
 from .trace import TraceLog
 from .modulator import Modulator
 from .replay import ReplayBuffer, Episode, consolidate
+from .astrocyte import NeuronAstrocyteMemory, SubstrateAstrocyteMemory
 
 __all__ = [
     # Layout / types
@@ -43,4 +44,6 @@ __all__ = [
     # Working primitives
     'WorkingMemory', 'TraceLog', 'Modulator',
     'ReplayBuffer', 'Episode', 'consolidate',
+    # Associative memory (neuron-astrocyte, bipartite gather/scatter)
+    'NeuronAstrocyteMemory', 'SubstrateAstrocyteMemory',
 ]
