@@ -69,7 +69,58 @@ not pattern interference — a coordinate outside a target's island gets no driv
 and never recovers, while *more* astrocytes cover *more* coordinates. Realized
 capacity is set by island size, not pattern count.
 
+## Reasoning probes — can the substrate compose, not just retrieve?
+
+Retrieval alone can only match context, never compose over it. These probes test
+the capabilities multi-step reasoning decomposes into. Each has a **held-out
+combinatorial split** (so memorization scores at chance) and a **1-hop retrieval
+foil** (structurally unable to answer held-out combinations). The
+substrate−foil gap on held-out items is the signal.
+
+**`reasoning_probe.py`** — four rungs (`python -m brain.tasks.assoc.reasoning_probe`):
+
+| rung | capability | substrate | foil | chance |
+|---|---|---|---|---|
+| 1 chaining | transitive inference (multi-hop spread, with interference) | **0.79** | 0.18 | 0.20 |
+| 2 binding | alias→var→value dereference | **1.00** | 0.24 | 0.25 |
+| 3 generalization | held-out verb×direction combinations | **1.00** | 0.00 | 0.12 |
+| 4 algorithmic | FSM state-tracking, length generalization | **1.00** | 0.39 | 0.25 |
+
+The foil is pinned at chance on every held-out split; the substrate composes.
+Verdict: the substrate **has the compositional primitives** retrieval lacks.
+Caveat: rungs 2–4 hit 1.00 because those synthetics are noise-free — they prove
+the mechanism exists, not that it is robust. That is what the next probe stresses.
+
+**`compounding_probe.py`** — the hard-mode gate
+(`python -m brain.tasks.assoc.compounding_probe`). A distributed-state FSM run in
+vector space through a learned linear transition `W_x`, whose crosstalk is the
+per-step error. Without cleanup, errors compound; with degree-4 DAM `retrieve()`
+each step, the attractor corrects the drift.
+
+```
+COMPOUNDING (M=24, d=64), accuracy vs chain length:
+    len N            1     2     4     8    16    32
+    OFF (feedfwd)  1.00  0.98  0.75  0.55  0.15  0.07   <- tracks p^N (p=0.92)
+    pred p^N       0.92  0.84  0.71  0.51  0.26  0.07
+    ON  (cleanup)  1.00  1.00  1.00  1.00  1.00  1.00   <- compounding defeated
+
+LOAD (N=16), accuracy vs #states M:
+    M              16    24    32    48    64    96
+    OFF          0.95  0.27  0.35  0.02  0.05  0.05
+    ON           1.00  1.00  0.92  0.92  0.85  0.17   <- basin holds to M~48-64
+```
+
+**The result:** feedforward error compounds as `p^N` (a chain right 2% of the
+time at M=48); associative cleanup defeats it (92% at M=48), flat to length 32
+within the basin. **Reasoning-chain length is bounded by per-step drift vs basin
+size, not by depth itself.** Past the load ceiling (~M=48–64 at d=64) single-step
+crosstalk exceeds the basin and even cleanup compounds. The concrete lever for
+longer reasoning is enlarging the basin (degree / d / encoding).
+
 ## Files
 
 - `experiments.py` — capacity sweep, attention equivalence, density sweep.
+- `reasoning_probe.py` — four-rung composition dip test vs a retrieval foil.
+- `compounding_probe.py` — error-compounding vs associative-cleanup gate.
 - `tests/test_astrocyte.py` — substrate ≡ dense equivalence + capacity + attention.
+- `tests/test_probes.py` — smoke tests that both probes run and separate from the foil.
