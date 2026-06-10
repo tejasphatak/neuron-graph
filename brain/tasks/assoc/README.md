@@ -117,10 +117,29 @@ size, not by depth itself.** Past the load ceiling (~M=48–64 at d=64) single-s
 crosstalk exceeds the basin and even cleanup compounds. The concrete lever for
 longer reasoning is enlarging the basin (degree / d / encoding).
 
+**`basin_scaling.py`** — what governs the basin / load ceiling
+(`python -m brain.tasks.assoc.basin_scaling`). Measures the ceiling (largest load
+M whose length-16 chain still recalls ≥90% with cleanup) vs the two knobs:
+
+```
+Ceiling vs DEGREE (d=64):     n=2 -> M=16   n=4 -> M=48   n=6 -> M=48
+Ceiling vs DIMENSION (deg=4): d=32 -> M=16  d=64 -> M=48  d=128 -> M=128
+                              ceiling/d:    0.50          0.75          1.00
+```
+
+Degree lifts the ceiling 2→4 (classic Hopfield's basins are too small for long
+chains) but **saturates** past 4 — beyond degree-4 the limit is the transition
+crosstalk, not the DAM. **Dimension is the dominant, super-linear lever**:
+`ceiling/d` rises 0.50→0.75→1.00, and at d=128 the chain holds M=d states *and
+beyond*. The substrate buys longer reasoning through **width (representation
+dimension), not depth** — it self-corrects, so you enlarge the basin rather than
+stack layers.
+
 ## Files
 
 - `experiments.py` — capacity sweep, attention equivalence, density sweep.
 - `reasoning_probe.py` — four-rung composition dip test vs a retrieval foil.
 - `compounding_probe.py` — error-compounding vs associative-cleanup gate.
+- `basin_scaling.py` — load ceiling vs interaction degree and dimension d.
 - `tests/test_astrocyte.py` — substrate ≡ dense equivalence + capacity + attention.
 - `tests/test_probes.py` — smoke tests that both probes run and separate from the foil.

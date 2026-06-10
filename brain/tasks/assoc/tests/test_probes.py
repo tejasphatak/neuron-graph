@@ -18,6 +18,7 @@ sys.path.insert(0, _REPO)
 
 from brain.tasks.assoc import reasoning_probe as rp
 from brain.tasks.assoc import compounding_probe as cp
+from brain.tasks.assoc import basin_scaling as bs
 
 
 # --------------------------------------------------------------------------- #
@@ -64,6 +65,16 @@ def test_compounding_cleanup_beats_feedforward():
     assert r["on"][-1] > 0.8
     # and feedforward should actually compound downward
     assert r["off"][-1] < r["off"][0]
+
+
+# --------------------------------------------------------------------------- #
+# basin scaling: a sharper nonlinearity enlarges the basin / load ceiling
+# --------------------------------------------------------------------------- #
+def test_higher_degree_raises_load_ceiling():
+    Ms = (4, 8, 16, 24, 32)
+    _, ceil2 = bs._ceiling(2, 48, Ms, N=8, trials=20, n_inputs=2, seed=0)
+    _, ceil4 = bs._ceiling(4, 48, Ms, N=8, trials=20, n_inputs=2, seed=0)
+    assert ceil4 > ceil2          # degree-4 basins hold more states than degree-2
 
 
 if __name__ == "__main__":
