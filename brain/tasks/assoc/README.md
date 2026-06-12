@@ -178,6 +178,27 @@ probe), not a token *distribution*. That sharpens the Tier-2 hypothesis: cleanup
 belongs on a distributed latent scratchpad between reasoning steps, never on the
 output distribution. See `brain/tasks/llm/tier1_dam_readout.py`.
 
+**Forward-Write LM — Tier 2 from the forward-only angle.** Take the lesson
+literally: put the richness in the *representation*, keep the readout
+linear+softmax. A fixed random **echo-state reservoir** turns context into a
+distributed, unbounded-history feature `h_t` (no training); a single **delta-rule**
+readout learns `feature → next-token` by a local forward-only write
+(`W_out += η·(onehot(y)−p)·h_tᵀ`), once per forward pass. Learning is by repeated
+exposure — no backprop anywhere; the readout *is* the astrocyte memory, softmax
+read = attention. On TinyStories (600 stories, V=1500, D=400), held-out PPL at each
+model's best temperature:
+
+```
+unigram floor            194      substrate-LLM bag-of-4   341      Forward-Write  124
+```
+
+A no-backprop LM whose weights self-update by repeated exposure **beats both the
+floor and a temperature-matched bag-of-4** — the reservoir's distributed context
+is the lever, exactly where Tier-1 said generalization had to live. Honest scope:
+PPL 124 wins only *among forward-only methods* (transformers reach single digits),
+and against a maximally-tuned bag-of-4 (Tier-1's 131) it is competitive, not
+dominant. See `brain/tasks/llm/forward_write.py` and `FORWARD_WRITE_SKETCH.md`.
+
 ## Files
 
 - `experiments.py` — capacity sweep, attention equivalence, density sweep.
