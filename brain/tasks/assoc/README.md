@@ -185,19 +185,23 @@ distributed, unbounded-history feature `h_t` (no training); a single **delta-rul
 readout learns `feature → next-token` by a local forward-only write
 (`W_out += η·(onehot(y)−p)·h_tᵀ`), once per forward pass. Learning is by repeated
 exposure — no backprop anywhere; the readout *is* the astrocyte memory, softmax
-read = attention. On TinyStories (600 stories, V=1500, D=400), held-out PPL at each
-model's best temperature:
+read = attention. **A negative result, after bulletproofing.** On TinyStories
+(1000 stories, V=1500, D=400), held-out PPL with the bag-of-4 at its *best case*
+(score-standardized + best-temp) and Forward-Write at its validated online best:
 
 ```
-unigram floor            194      substrate-LLM bag-of-4   341      Forward-Write  124
+unigram floor   193.80      bag-of-4 best case   107.94      Forward-Write   119.03
 ```
 
-A no-backprop LM whose weights self-update by repeated exposure **beats both the
-floor and a temperature-matched bag-of-4** — the reservoir's distributed context
-is the lever, exactly where Tier-1 said generalization had to live. Honest scope:
-PPL 124 wins only *among forward-only methods* (transformers reach single digits),
-and against a maximally-tuned bag-of-4 (Tier-1's 131) it is competitive, not
-dominant. See `brain/tasks/llm/forward_write.py` and `FORWARD_WRITE_SKETCH.md`.
+A no-backprop LM whose weights self-update by repeated exposure **beats the unigram
+floor by 39%** — the forward-only repetition write genuinely learns — but **loses
+~10% to a maximally-tuned bag-of-4.** A *fixed random* reservoir is not a rich
+enough representation to beat calibrated token-context; the representation must be
+learned, not random (confirming risk #1 of the sketch). An early under-powered run
+(600 stories, un-standardized bag-of-4) looked like a 63% *win* — the bulletproofing
+sweep killed that artifact, the same discipline that caught the Tier-1 degree-3
+mirage. The door this opens: a backprop-free *learned* reservoir. See
+`brain/tasks/llm/forward_write.py`, `forward_write_sweep.py`, `FORWARD_WRITE_SKETCH.md`.
 
 ## Files
 

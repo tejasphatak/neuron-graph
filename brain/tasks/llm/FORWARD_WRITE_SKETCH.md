@@ -158,47 +158,73 @@ softmax read = attention. Same object, reservoir front-end, learned by repetitio
 
 ---
 
-## Result (v1, TinyStories, 600 train / 100 test stories, V=1500, D=400, 4 epochs)
+## Result — a NEGATIVE result, after bulletproofing
 
-Held-out PPL, every model at its **own best temperature** (the Tier-1 control —
-softmax sharpness must not confound the comparison), identical eval pipeline:
+The mechanism works (no backprop, learns by repeated exposure) but a **fixed random
+reservoir is not a rich enough representation to beat tuned token-context.**
+
+### What the first, under-powered run suggested (and why it was wrong)
+
+TinyStories, **600** train stories, an **un-standardized** bag-of-4, best-temp eval:
 
 ```
 unigram floor            194.31
-substrate-LLM bag-of-4   340.72   @T=0.25     forward-only perceptron, bag-of-4 tokens
-Forward-Write (ours)     124.42   @T=2.0      forward-only delta rule, reservoir context
+substrate-LLM bag-of-4   340.72   @T=0.25     <- data-starved AND un-standardized
+Forward-Write (ours)     124.42   @T=2.0
 ```
 
-**Forward-Write beats both the floor and a temperature-matched bag-of-4.** No
-backprop anywhere: fixed random reservoir + delta-rule writes + repeated exposure.
-Generalization comes from the reservoir representation, not the store — exactly as
-the Tier-1 negative predicted it had to. Train surprise is flat across epochs
-(4.74 → 3.98): a delta rule converges in ~one pass.
+This looked like a 63% win over bag-of-4. It was an artifact: the bag-of-4 was both
+data-starved (sparse 4-gram stats over 600 stories) and uncalibrated.
 
-**Honest scope (do not oversell):**
-1. Small scale. The bag-of-4 here is data-starved — it is *worse than unigram*
-   (sparse 4-gram stats over 600 stories). With 1000 stories + score
-   standardization, the same bag-of-4 reached **131** in the Tier-1 study, so
-   against a *maximally-tuned* bag-of-4, Forward-Write (124) is roughly
-   *competitive*, not 63% ahead. Robust claim: **beats the floor and a like-for-like
-   bag-of-4**; the gap to a best-case bag-of-4 is small and not yet measured under
-   identical conditions.
-2. PPL 124 is not a good LM (TinyStories transformers reach single-to-low-double
-   digits). The win is *among forward-only, no-backprop methods* — it does not
-   challenge backprop-trained models.
-3. The readout ceiling is a linear model on fixed random features (the delta rule
-   converges to least-squares on the reservoir). The reservoir-too-weak risk is
-   real; the next lever is a richer / partially-structured reservoir, or a larger
-   D, both still backprop-free.
+### What the bulletproofing showed (the honest result)
 
-**Next, to make the headline bulletproof:** Forward-Write vs the *best-case*
-bag-of-4 (1000+ stories, standardized eval, best-temp) under one identical harness;
-sweep D and spectral radius; confirm the reservoir advantage survives more data.
+`forward_write_sweep.py`: **1000** train stories, bag-of-4 at its **best case**
+(score-standardized + best-temp — the Tier-1 calibration), Forward-Write swept over
+D and spectral radius, one identical harness. Validated **online** Forward-Write
+(the true mechanism) at matched data:
+
+```
+unigram floor                  193.80
+bag-of-4 best case             107.94   @T=0.25   <- winner
+Forward-Write online @1000     119.03   @T=2.0    <- loses by ~10%
+```
+
+**Forward-Write loses to a maximally-tuned bag-of-4 (119 vs 108, ~10%).** It still
+beats the unigram floor by **39%** — the random reservoir carries real predictive
+context, the forward-only repetition write genuinely learns — but a fixed random
+representation is not enough to beat calibrated token-context. This **confirms
+risk #1 below**: the representation must be learned, not random.
+
+### Method caveat learned the hard way (documented so the next-me doesn't repeat it)
+
+The `train_epoch_batched` BLAS path is **only used for cheap sweeping, and its
+training dynamics differ from the online rule at large batch.** The online delta
+rule applies updates *sequentially* (each write sees the corrected `W_out`; the
+e→0 self-correction depends on this). Summing ~1000 simultaneous per-timestep
+updates at fixed `W_out` overshoots — worse for larger D (bigger `‖h‖` → bigger
+step) — which made an early batched sweep report a spurious PPL ~250 and a *false*
+"reservoir too weak" verdict. **`perplexity_batched` (eval, no writes) is exact and
+safe; `train_epoch_batched` is an approximation — trust `train_epoch` (online) for
+any quality claim.** The 119.03 headline is the online number.
+
+**Honest scope:** PPL ~119 is not a good LM (TinyStories transformers reach
+single-to-low-double digits). This was only ever a contest *among forward-only,
+no-backprop methods*, and within that contest a random reservoir places second to
+calibrated token-context.
+
+### Where this points
+
+The readout ceiling is a linear model on **fixed** random features. The next lever
+is a **learned** representation that is still backprop-free — Hebbian / predictive-
+coding shaping of `W_res` and the embeddings, or a hybrid where a learned local
+rule (cf. the `metaplastic` project) trains the reservoir. That is the door this
+negative result opens.
 
 ## One-line summary
 
-**Echo-state reservoir (fixed, generalizing features) + delta-rule associative
-readout (forward-only, repetition-driven) = the neuron-astrocyte memory turned
-into a language model with no backprop.** Read is proven (attention); write is the
-delta rule; the Tier-1 negative tells us to keep the output linear and put the
-richness in the reservoir. Falsified or confirmed by one held-out-PPL run.
+**Echo-state reservoir (fixed random) + delta-rule readout (forward-only,
+repetition-driven) = the neuron-astrocyte memory as a no-backprop LM.** It learns
+(beats the unigram floor 39%) but a *random* reservoir loses ~10% to a tuned
+bag-of-4 — confirming that the representation must be learned, not random. Read is
+proven (attention); write is the delta rule; the next question is a backprop-free
+*learned* reservoir.

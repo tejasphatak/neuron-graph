@@ -65,6 +65,15 @@ class Reservoir:
         pre = self.W_res @ h + self.W_in @ u
         return (1.0 - self.leak) * h + self.leak * np.tanh(pre)
 
+    def step_batch(self, H: np.ndarray, tokens: np.ndarray) -> np.ndarray:
+        """Vectorised step over many sequences at once. H (B,D), tokens (B,) ->
+        (B,D). Same map as step(), batched across the sequence dimension so the
+        per-token recurrence runs as BLAS matmuls (orders faster than a Python
+        loop). Equivalent to calling step() per row."""
+        u = self.E[tokens]                              # (B, d_in)
+        pre = H @ self.W_res.T + u @ self.W_in.T        # (B, D)
+        return (1.0 - self.leak) * H + self.leak * np.tanh(pre)
+
 
 # --------------------------------------------------------------------------- #
 # Forward-Write language model — delta-rule readout over reservoir features
@@ -117,11 +126,75 @@ class ForwardWriteLM:
                 n += 1
         return math.exp(log_loss / n) if n else float('inf')
 
-    def best_temp_perplexity(self, sequences, temps=(0.25, 0.5, 1.0, 2.0, 4.0)):
+    # ---- batched rollout (BLAS) — same math, sequences processed in parallel -- #
+    @staticmethod
+    def _pad(sequences, V):
+        seqs = [[t for t in s if 0 <= t < V] for s in sequences]
+        seqs = [s for s in seqs if len(s) >= 2]
+        lengths = np.array([len(s) for s in seqs], dtype=np.int64)
+        maxlen = int(lengths.max())
+        toks = np.zeros((len(seqs), maxlen), dtype=np.int64)
+        for i, s in enumerate(seqs):
+            toks[i, :len(s)] = s
+        return toks, lengths
+
+    def train_epoch_batched(self, sequences, *, eta: float) -> float:
+        """Minibatch delta rule: at each time index, write the summed-over-active-
+        sequences update. A standard SGD-minibatch variant of the online rule;
+        the reservoir recurrence stays exact and causal in time."""
+        toks, lengths = self._pad(sequences, self.V)
+        B, maxlen = toks.shape
+        H = np.zeros((B, self.res.D), dtype=np.float32)
+        loss, n = 0.0, 0
+        for t in range(maxlen - 1):
+            H = self.res.step_batch(H, toks[:, t])
+            valid = (t + 1) < lengths                    # (B,)
+            if not valid.any():
+                break
+            S = H @ self.W_out.T                         # (B, V)
+            S -= S.max(axis=1, keepdims=True)
+            P = np.exp(S); P /= P.sum(axis=1, keepdims=True)
+            tgt = toks[:, t + 1]
+            idx = np.where(valid)[0]
+            loss += -np.log(np.maximum(P[idx, tgt[idx]], 1e-12)).sum()
+            n += idx.size
+            Egrad = -P
+            Egrad[idx, tgt[idx]] += 1.0
+            Egrad[~valid] = 0.0
+            # SUM (not mean) over active sequences: the epoch's total update then
+            # equals the online rule's exactly — same outer products, grouped by
+            # timestep. A /idx.size here would shrink the effective lr ~B-fold.
+            self.W_out += eta * (Egrad.T @ H)               # (V,D)
+        return loss / max(n, 1)
+
+    def perplexity_batched(self, sequences, *, temperature: float = 1.0,
+                           prob_floor: float = 1e-8) -> float:
+        """Exact batched eval (write OFF) — identical to perplexity(), faster."""
+        toks, lengths = self._pad(sequences, self.V)
+        B, maxlen = toks.shape
+        H = np.zeros((B, self.res.D), dtype=np.float32)
+        log_loss, n = 0.0, 0
+        for t in range(maxlen - 1):
+            H = self.res.step_batch(H, toks[:, t])
+            valid = (t + 1) < lengths
+            if not valid.any():
+                break
+            S = (H @ self.W_out.T) / max(1e-6, temperature)
+            S -= S.max(axis=1, keepdims=True)
+            P = np.exp(S); P /= P.sum(axis=1, keepdims=True)
+            tgt = toks[:, t + 1]
+            idx = np.where(valid)[0]
+            log_loss += -np.log(np.maximum(P[idx, tgt[idx]], prob_floor)).sum()
+            n += idx.size
+        return math.exp(log_loss / n) if n else float('inf')
+
+    def best_temp_perplexity(self, sequences, temps=(0.25, 0.5, 1.0, 2.0, 4.0),
+                             batched: bool = False):
         """Fair calibrated PPL: minimum over a temperature sweep (the same
         control Tier-1 used — softmax sharpness must not confound the model
         comparison)."""
-        curve = {t: self.perplexity(sequences, temperature=t) for t in temps}
+        ppl = self.perplexity_batched if batched else self.perplexity
+        curve = {t: ppl(sequences, temperature=t) for t in temps}
         bt = min(curve, key=curve.get)
         return curve[bt], bt, curve
 

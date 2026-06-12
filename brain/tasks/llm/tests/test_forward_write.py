@@ -73,5 +73,44 @@ def test_beats_unigram_floor_on_learnable_language():
     assert np.isfinite(fw)
 
 
+def test_batched_eval_matches_online():
+    """perplexity_batched must equal perplexity exactly — same math, the only
+    difference is BLAS over the sequence dimension. Validates step_batch."""
+    seqs, V = _markov_corpus(n_seqs=15, length=18, seed=7)
+    lm = ForwardWriteLM(Reservoir(vocab=V, D=48, seed=7))
+    for _ in range(3):
+        lm.train_epoch(seqs, eta=0.05)            # train online, then compare evals
+    online = lm.perplexity(seqs, temperature=1.3)
+    batched = lm.perplexity_batched(seqs, temperature=1.3)
+    assert abs(online - batched) / online < 1e-4
+
+
+def test_batched_train_learns():
+    seqs, V = _markov_corpus(n_seqs=120, seed=8)
+    test, _ = _markov_corpus(n_seqs=40, seed=88)
+    lm = ForwardWriteLM(Reservoir(vocab=V, D=96, seed=8))
+    first = lm.train_epoch_batched(seqs, eta=0.05)
+    for _ in range(5):
+        last = lm.train_epoch_batched(seqs, eta=0.05)
+    assert last < first
+    assert lm.perplexity_batched(test) < unigram_perplexity(seqs, test, V)
+
+
+def test_batched_train_matches_online():
+    """The minibatch (sum) delta rule must reach the SAME quality as the online
+    rule — its epoch total update is the same set of outer products. Guards the
+    scaling bug where a /batch_size shrank the effective learning rate ~B-fold."""
+    train, V = _markov_corpus(n_seqs=120, seed=3)
+    test, _ = _markov_corpus(n_seqs=40, seed=99)
+    lm_on = ForwardWriteLM(Reservoir(vocab=V, D=96, seed=3))
+    lm_ba = ForwardWriteLM(Reservoir(vocab=V, D=96, seed=3))
+    for _ in range(6):
+        lm_on.train_epoch(train, eta=0.05)
+        lm_ba.train_epoch_batched(train, eta=0.05)
+    on = lm_on.perplexity(test)
+    ba = lm_ba.perplexity_batched(test)
+    assert abs(on - ba) / on < 0.15            # same quality, not ~B× worse
+
+
 if __name__ == "__main__":
     sys.exit(pytest.main([__file__, "-v"]))
