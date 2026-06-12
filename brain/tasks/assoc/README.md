@@ -135,6 +135,49 @@ beyond*. The substrate buys longer reasoning through **width (representation
 dimension), not depth** — it self-corrects, so you enlarge the basin rather than
 stack layers.
 
+## The LLM bridge — Tier 1: does the capacity law touch real language?
+
+Everything above is on synthetic patterns. The bridge test: the existing
+substrate-LLM (`brain/tasks/llm/llm.py`) readout is **degree-1 and linear** —
+`scores = Σ_k decay^k · W[ctx_row_k]`. That sum *is* the astrocyte gather at
+degree 1, with no nonlinearity and no scatter. Tier 1 lifts it to the full
+degree-n DAM pass over the **same trained W** (each vocabulary token is an
+astrocyte; its synaptic island is its W row), zero retraining:
+
+```
+overlap_μ = Σ_i W[μ,i]·c_i ;   glio_μ = sign·|overlap_μ|^(n-1) ;   c_clean = Σ_μ W[μ,i]·glio_μ
+```
+
+Hypothesis: if `capacity ~ N^(n-1)` transfers, held-out PPL should fall as
+degree rises. **It does not.** `brain/tasks/llm/tier1_dam_readout.py`, TinyStories,
+V=1500, 5 epochs, **best-temperature** per readout (the fair control — each
+degree's power nonlinearity peaks the score distribution differently, so a fixed
+softmax temperature confounds shape with sharpness):
+
+```
+  readout       best PPL   @temp     vs deg1
+  deg1 (linear)   131.66   0.25     —          <- best
+  deg4            140.71   0.25    +6.9%
+  deg3            178.26   0.5    +35.4%
+  deg2            267.91   2.0   +103.5%
+  softmax         424.24   0.5   +222.2%
+```
+
+(At a *fixed* temperature=1.0, degree-3 spuriously "wins" −34%; the temperature
+sweep kills that — deg1's optimum is interior at 0.25, not a grid edge.)
+
+**The finding (a clean negative):** associative cleanup and language modeling
+want opposite things. Cleanup assumes the cue is a *corrupted single pattern* and
+collapses it to the nearest attractor; a next-token distribution is genuinely a
+*mixture* of continuations, and the readout cue `c` is a blend, not a corrupted
+memory. Higher degree = sharper collapse = more of the mixture destroyed — hence
+monotonic degradation. **Capacity (autoassociative cleanup) does not transfer to
+the token-distribution readout.** It can only help where there *is* a single
+correct latent state to clean toward — i.e. a reasoning *chain* (the compounding
+probe), not a token *distribution*. That sharpens the Tier-2 hypothesis: cleanup
+belongs on a distributed latent scratchpad between reasoning steps, never on the
+output distribution. See `brain/tasks/llm/tier1_dam_readout.py`.
+
 ## Files
 
 - `experiments.py` — capacity sweep, attention equivalence, density sweep.
@@ -143,3 +186,5 @@ stack layers.
 - `basin_scaling.py` — load ceiling vs interaction degree and dimension d.
 - `tests/test_astrocyte.py` — substrate ≡ dense equivalence + capacity + attention.
 - `tests/test_probes.py` — smoke tests that both probes run and separate from the foil.
+- `../llm/tier1_dam_readout.py` — degree-n associative readout on the substrate-LLM
+  (the Tier-1 bridge above); `../llm/tests/test_tier1_dam.py` guards it.
